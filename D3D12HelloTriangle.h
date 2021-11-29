@@ -175,4 +175,7 @@ private:
 	ComPtr<ID3D12DescriptorHeap > m_constHeap;	// rasterization
 	ComPtr<ID3D12Resource > m_cameraBuffer;		// raytracing
 	uint32_t m_cameraBufferSize = 0;
+	// #DXR Extra: Perspective Camera ++ 
+	void OnButtonDown(UINT32 lParam); 
+	void OnMouseMove(UINT8 wParam, UINT32 lParam);
 };

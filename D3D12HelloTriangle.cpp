@@ -13,13 +13,18 @@
 #include "D3D12HelloTriangle.h"
 #include <stdexcept>
 
-//---ray tracing header---
+// # DXR - Raytracing
 #include "DXRHelper.h"
-// ## Shader Binding Table
+// # DXR - Shader Binding Table
 #include "nv_helpers_dx12/ShaderBindingTableGenerator.h"
-// ## Raytracing pipeline
+// # DXR - Raytracing pipeline
 #include "nv_helpers_dx12/RaytracingPipelineGenerator.h"
 #include "nv_helpers_dx12/RootSignatureGenerator.h"
+// # DXR Extras - Perspective camera
+#include "glm/gtc/type_ptr.hpp" 
+#include "manipulator.h" 
+
+#include "Windowsx.h"
 //------------------------
 
 D3D12HelloTriangle::D3D12HelloTriangle(UINT width, UINT height, std::wstring name) :
@@ -33,6 +38,10 @@ D3D12HelloTriangle::D3D12HelloTriangle(UINT width, UINT height, std::wstring nam
 
 void D3D12HelloTriangle::OnInit()
 {
+	// # DXR Extras - Perspective Camera
+	nv_helpers_dx12::CameraManip.setWindowSize(GetWidth(), GetHeight()); 
+	nv_helpers_dx12::CameraManip.setLookat(glm::vec3(1.5f, 1.5f, 1.5f), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+
 	LoadPipeline();
 	LoadAssets();
 
@@ -40,8 +49,7 @@ void D3D12HelloTriangle::OnInit()
 	// 检查设备是否支持 raytracing 
 	CheckRaytracingSupport(); 
 
-	// ## Acceleration Structure
-	// 
+	// # DXR - Acceleration Structure
 	// 给 raytracing 配置 acceleration structures (AS). When setting up 
 	// geometry, each bottom-level AS has its own transform matrix. 
 	CreateAccelerationStructures(); 
@@ -51,7 +59,7 @@ void D3D12HelloTriangle::OnInit()
 	// close it now. 
 	ThrowIfFailed(m_commandList->Close());
 	
-	// ## Raytracing Pipeline 
+	// # DXR - Raytracing Pipeline 
 	// 
 	// Create the raytracing pipeline, associating the shader code to symbol names
 	// and to their root signatures, and defining the amount of memory carried by
@@ -63,7 +71,7 @@ void D3D12HelloTriangle::OnInit()
 	// as the target image
 	CreateRaytracingOutputBuffer();
 
-	// #DXR Extra: Perspective Camera
+	// # DXR Extra - Perspective Camera
 	// 创建用于存储 modelview 和 perspective camera matrices 的缓冲
 	CreateCameraBuffer();
 
@@ -929,7 +937,7 @@ void D3D12HelloTriangle::CreateCameraBuffer() {
 	m_device->CreateConstantBufferView(&cbvDesc, srvHandle);
 }
 
-// #DXR Extra: Perspective Camera
+// # DXR Extra - Perspective Camera
 //--------------------------------------------------------------------------------
 // 
 // 创建和复制camera viewmodel 及 perspective 矩阵
@@ -938,10 +946,15 @@ void D3D12HelloTriangle::UpdateCameraBuffer() {
 	std::vector<XMMATRIX> matrices(4); 
 	// 初始化 view matrix，理想情况下该矩阵基于用户的互动。用于光栅化的 lookat 和 
 	// perspective matrices 被定义来将世界向量变换到 [0,1]x[0,1]x[0,1] 相机空间
-	XMVECTOR Eye = XMVectorSet(1.5f, 1.5f, 1.5f, 0.0f); 
+	/* 
+	XMVECTOR Eye = XMVectorSet(1.5f, 1.5f, 1.5f, 0.0f);
 	XMVECTOR At = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
 	XMVECTOR Up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f); 
 	matrices[0] = XMMatrixLookAtRH(Eye, At, Up); 
+	*/
+	const glm::mat4& mat = nv_helpers_dx12::CameraManip.getMatrix(); 
+	memcpy(&matrices[0].r->m128_f32[0], glm::value_ptr(mat), 16 * sizeof(float));
+
 	float fovAngleY = 45.0f * XM_PI / 180.0f; 
 	matrices[1] = XMMatrixPerspectiveFovRH(fovAngleY, m_aspectRatio, 0.1f, 1000.0f); 
 	// 光追和光栅化相反，光线在相机空间被定义，然后被转换到世界空间中。为此，我们需要保存
@@ -955,3 +968,26 @@ void D3D12HelloTriangle::UpdateCameraBuffer() {
 	memcpy(pData, matrices.data(), m_cameraBufferSize); m_cameraBuffer->Unmap(0, nullptr);
 }
 
+// # DXR Extra - Perspective Camera
+//-------------------------------------------------------------------------------- 
+//  
+// 
+void D3D12HelloTriangle::OnButtonDown(UINT32 lParam) {
+	nv_helpers_dx12::CameraManip.setMousePosition(-GET_X_LPARAM(lParam), -GET_Y_LPARAM(lParam)); 
+} 
+
+// # DXR Extra - Persepective Camera
+//--------------------------------------------------------------------------------
+// 
+void D3D12HelloTriangle::OnMouseMove(UINT8 wParam, UINT32 lParam) { 
+	using nv_helpers_dx12::Manipulator; Manipulator::Inputs inputs;
+	inputs.lmb = wParam & MK_LBUTTON; inputs.mmb = wParam & MK_MBUTTON;
+	inputs.rmb = wParam & MK_RBUTTON;
+	if (!inputs.lmb && !inputs.rmb && !inputs.mmb) 
+		return; 
+	// no mouse button pressed 
+	inputs.ctrl = GetAsyncKeyState(VK_CONTROL); 
+	inputs.shift = GetAsyncKeyState(VK_SHIFT);
+	inputs.alt = GetAsyncKeyState(VK_MENU); 
+	nv_helpers_dx12::CameraManip.mouseMove(-GET_X_LPARAM(lParam), -GET_Y_LPARAM(lParam), inputs);
+}

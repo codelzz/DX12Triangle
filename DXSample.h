@@ -55,4 +55,9 @@ private:
 
 	// Window title.
 	std::wstring m_title;
+
+public:
+	// #DXR Perspective Camera
+	virtual void OnButtonDown(UINT32) {}
+	virtual void OnMouseMove(UINT8, UINT32) {}
 };

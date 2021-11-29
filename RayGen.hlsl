@@ -19,6 +19,15 @@ RWTexture2D< float4 > gOutput : register(u0);
 // Raytracing acceleration structure, accessed as a SRV
 RaytracingAccelerationStructure SceneBVH : register(t0);
 
+// #DXR Extra: Perspective Camera
+cbuffer CameraParams : register(b0)
+{
+    float4x4 view;          
+    float4x4 projection;    
+    float4x4 viewI;         /* View Invertion*/
+    float4x4 projectionI;   /* Projection Invertion*/
+}
+
 [shader("raygeneration")] 
 void RayGen() {
     // 初始化光线 payload 
@@ -36,9 +45,12 @@ void RayGen() {
     // [Question] 为什么像素平面位置等于相机位置？
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // 定义一束光线，包含原点，方向，和最大-最小距离值
+    // # DXR Extra: Perspective Camera 
+    float aspectRatio = dims.x / dims.y;
     RayDesc ray;
-    ray.Origin = float3(d.x, -d.y, 1); // y 坐标被反转用于匹配 DirectX 的习惯。
-    ray.Direction = float3(0, 0, -1);
+    ray.Origin = mul(viewI, float4(0, 0, 0, 1));
+    float4 target = mul(projectionI, float4(d.x, -d.y, 1, 1));
+    ray.Direction = mul(viewI, float4(target.xyz, 0));
     ray.TMin = 0;
     ray.TMax = 100000;
     

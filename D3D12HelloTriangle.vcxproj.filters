@@ -13,7 +13,10 @@
     <Filter Include="Assets\Shaders">
       <UniqueIdentifier>{8b0cb0c9-e0d8-4107-91c8-11654fac88e7}</UniqueIdentifier>
     </Filter>
-    <Filter Include="DXR Helpers">
+    <Filter Include="DXR Helpers - Perspective Camera">
+      <UniqueIdentifier>{3ed60ac3-5439-4b6e-b8ef-81d454566c22}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="DXR Helpers - Raytracing">
       <UniqueIdentifier>{b452cb09-80c2-4271-8048-95852b0682bd}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
@@ -37,19 +40,22 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="nv_helpers_dx12\BottomLevelASGenerator.h">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClInclude>
     <ClInclude Include="nv_helpers_dx12\RaytracingPipelineGenerator.h">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClInclude>
     <ClInclude Include="nv_helpers_dx12\RootSignatureGenerator.h">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClInclude>
     <ClInclude Include="nv_helpers_dx12\ShaderBindingTableGenerator.h">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClInclude>
     <ClInclude Include="nv_helpers_dx12\TopLevelASGenerator.h">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
+    </ClInclude>
+    <ClInclude Include="manipulator.h">
+      <Filter>DXR Helpers - Perspective Camera</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -69,19 +75,22 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="nv_helpers_dx12\BottomLevelASGenerator.cpp">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClCompile>
     <ClCompile Include="nv_helpers_dx12\RaytracingPipelineGenerator.cpp">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClCompile>
     <ClCompile Include="nv_helpers_dx12\RootSignatureGenerator.cpp">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClCompile>
     <ClCompile Include="nv_helpers_dx12\ShaderBindingTableGenerator.cpp">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
     </ClCompile>
     <ClCompile Include="nv_helpers_dx12\TopLevelASGenerator.cpp">
-      <Filter>DXR Helpers</Filter>
+      <Filter>DXR Helpers - Raytracing</Filter>
+    </ClCompile>
+    <ClCompile Include="manipulator.cpp">
+      <Filter>DXR Helpers - Perspective Camera</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
