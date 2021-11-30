@@ -22,6 +22,38 @@ struct STriVertex
 };
 StructuredBuffer<STriVertex> BTriVertex : register(t0);
 
+/*
+// #DXR Extra: Per-Instance Data
+cbuffer Colors : register(b0)
+{
+    float3 A[3];
+    float3 B[3];
+    float3 C[3];
+}
+*/
+
+// c++源码中，我们对每个实例使用独立的常量缓冲该部分代码将被舍弃
+// #DXR Extra: Per-Instance Data
+struct StructColor
+{
+    float4 a;
+    float4 b;
+    float4 c;
+};
+cbuffer Colors : register(b0)
+{
+    StructColor Tint[3];
+}
+
+/*
+// #DXR Extra: Per-Instance Data
+cbuffer Colors : register(b0)
+{
+    float3 A;
+    float3 B;
+    float3 C;
+}*/
+
 [shader("closesthit")] 
 void ClosestHit(inout HitInfo payload, Attributes attrib) 
 {
@@ -36,12 +68,21 @@ void ClosestHit(inout HitInfo payload, Attributes attrib)
     // #DXR Extra: Per-Instance Data
     float3 hitColor = float3(0.6, 0.7, 0.6);
     // Shade only the first 3 instances (triangles)
+    int instanceID = InstanceID();
+    // #DXR Extra: Per-Instance Data
+    // float3 hitColor = A * barycentrics.x + B * barycentrics.y + C * barycentrics.z;
+    
+    if (instanceID < 3)
+    {
+        // #DXR Extra: Per-Instance Data
+        hitColor = Tint[instanceID].a * barycentrics.x + Tint[instanceID].b * barycentrics.y + Tint[instanceID].c * barycentrics.z;
+    }
+    /*
     if (InstanceID() < 3)
     {
         // #DXR Extra: Per-Instance Data
-        hitColor = BTriVertex[vertId + 0].color * barycentrics.x +
-                   BTriVertex[vertId + 1].color * barycentrics.y +
-                   BTriVertex[vertId + 2].color * barycentrics.z;
-    }
+        // hitColor = BTriVertex[vertId + 0].color * barycentrics.x + BTriVertex[vertId + 1].color * barycentrics.y + BTriVertex[vertId + 2].color * barycentrics.z;
+        hitColor = A[InstanceID()] * barycentrics.x + B[InstanceID()] * barycentrics.y + C[InstanceID()] * barycentrics.z;
+    }*/
     payload.colorAndDistance = float4(hitColor, RayTCurrent());
 }

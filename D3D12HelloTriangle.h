@@ -181,12 +181,20 @@ private:
 	// 鼠标响应事件 
 	void OnButtonDown(UINT32 lParam); 
 	void OnMouseMove(UINT8 wParam, UINT32 lParam);
-
+	
+	// -----------------------------------------------------------------------------------
 	// #DXR Extra: Per-Instance Data
 	// 用于创建平面
 	ComPtr<ID3D12Resource> m_planeBuffer;
 	D3D12_VERTEX_BUFFER_VIEW m_planeBufferView;
 	void CreatePlaneVB();
+	// 常量缓冲（Constant Buffer）可以用于从CPU侧向shaders发送只读数据。这里，我们将会创建一个常
+	// 量缓冲包含颜色数据（其用于在shader中更改顶点数据）。
+	ComPtr<ID3D12Resource> m_globalConstantBuffer;
+	void D3D12HelloTriangle::CreateGlobalConstantBuffer();
+	// 在更加现实的场景中，常量缓存被对每个实例单独定义，这样他们可以被独立管理。	
+	void CreatePerInstanceConstantBuffers();
+	std::vector<ComPtr<ID3D12Resource>> m_perInstanceConstantBuffers;
 
 	// #DXR
 	// 创建三角形顶点缓冲

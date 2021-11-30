@@ -66,6 +66,14 @@ void D3D12HelloTriangle::OnInit()
 	// rays (ray payload)
 	CreateRaytracingPipeline();
 
+	// #DXR Extra: Per-Instance Data
+	// 对每个实例单独创建常量缓冲
+	CreatePerInstanceConstantBuffers();
+
+	// #DXR Extra: Per-Instance Data
+	// 创建一个常量缓冲，其包含每个三角形实例中每个顶点颜色
+	CreateGlobalConstantBuffer();
+
 	// ## Raytracing Resource
 	// Allocate the buffer storing the raytracing output, with the same dimensions
 	// as the target image
@@ -258,46 +266,11 @@ void D3D12HelloTriangle::LoadAssets()
 	// Create the command list.
 	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
-	// Create the vertex buffer.
+	// 创建顶点缓冲
 	{
-		/*
-		// 定义三角形几何结构
-		Vertex triangleVertices[] = {
-			{{0.0f, 0.25f * m_aspectRatio, 0.0f}, {1.0f, 1.0f, 0.0f, 1.0f}}, 
-			{{0.25f, -0.25f * m_aspectRatio, 0.0f}, {0.0f, 1.0f, 1.0f, 1.0f}}, 
-			{{-0.25f, -0.25f * m_aspectRatio, 0.0f}, {1.0f, 0.0f, 1.0f, 1.0f}} 
-		};
-		const UINT vertexBufferSize = sizeof(triangleVertices);
-		// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
-		// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
-		// 适用于简化代码，并且只有很少的 verts 被实际转移。
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_vertexBuffer)));
-
-		// 将三角形数据复制到顶点缓冲
-		UINT8* pVertexDataBegin;
-		CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
-		ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
-		memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
-		m_vertexBuffer->Unmap(0, nullptr);
-
-		// 初始化顶点缓冲视图
-		m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
-		m_vertexBufferView.StrideInBytes = sizeof(Vertex);
-		m_vertexBufferView.SizeInBytes = vertexBufferSize;
-		*/
-
-		// 创建三角形顶点缓冲
-		CreateTriangleVB();
-
+		CreateTriangleVB();	// 创建三角形顶点缓冲
 		// #DXR - Per Instance
-		// 创建地平面顶点缓冲, 与上述三角形缓冲类似
-		CreatePlaneVB();
+		CreatePlaneVB();    // 创建地平面顶点缓冲, 与上述三角形缓冲类似
 	}
 
 	// Create synchronization objects and wait until assets have been uploaded to the GPU.
@@ -593,9 +566,12 @@ void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3
 		m_topLevelASGenerator.AddInstance(
 			instances[i].first.Get(), 
 			instances[i].second, 
-			static_cast<UINT>(i) /*实例ID，可通过DXR内置方法InstanceID()在hlsl中获取该值*/,
-			static_cast<UINT>(0));
+			static_cast<UINT>(i)   /*实例ID，可通过DXR内置方法InstanceID()在hlsl中获取该值*/,
+			static_cast<UINT>(0)); /* 这里我们需要将实例与其自己在SBT中的Hit group关联，
+								   这样 i-th 三角形将会调用第一个在SBT中定义的hitgroup，
+								   其自生引用m_perInstanceConstantBuffers[i] */
 	} 
+
 	// 与 BLAS 类似，构造加速结构需要一些临时空间(scratch space)来存储临时数据以创建实际的加速结构。
 	// 在 TLAS 情景下，instance descriptor 同样需要被存储到 GPU 内存中。该方法输出了每个 (scratch
 	// ,result, instance descriptor) 的内存需求，这样程序可以分配相应的内存。
@@ -715,6 +691,12 @@ ComPtr<ID3D12RootSignature> D3D12HelloTriangle::CreateHitSignature() {
 	// 为了访问 vertex buffer 我们需要告诉 Hit Root Signature 我们将会使用 shader resource view。
 	// 默认情况下，它会与shader中的 register(t0) 绑定
 	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV);
+	// #DXR Extra: Per-Instance Data
+	// 我们这里修改 hit shader 的 root signature 来将常量缓冲作为 root parameter 传递
+	// 与在堆中传递的缓冲相反，root parameter 可以对每个实例传递。由于这是我们第一个在
+	// root signature 声明的常量缓冲，我们将其与 register 0 绑定，它将会在 HLSL 代码中
+	// 作为 register(0) 访问。
+	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_CBV, 0);
 	return rsc.Generate(m_device.Get(), true);
 }
 
@@ -899,9 +881,25 @@ void D3D12HelloTriangle::CreateShaderBindingTable() {
 	// communicate their results through the ray payload
 	m_sbtHelper.AddMissProgram(L"Miss", {});
 
-	// Adding the triangle hit shader
+	// 添加三角形碰撞 shader 
 	// 这里需要将GPU内存中的这个缓冲地址传递给 Hit shader
-	m_sbtHelper.AddHitGroup(L"HitGroup",{ (void*)(m_vertexBuffer->GetGPUVirtualAddress()) });
+	
+	m_sbtHelper.AddHitGroup(
+		L"HitGroup",
+		{(void*)(m_vertexBuffer->GetGPUVirtualAddress()),
+		 (void*)m_globalConstantBuffer->GetGPUVirtualAddress() // #DXR Extra: Per-Instance Data 常量缓冲数据 
+		}
+	); 
+	// #DXR Extra: Per-Instance Data
+	// 我们有三个三角形，=他们中的每个都需要访问其自己的常量缓冲作为root parameter在其primary hit shader。
+	// shadow hit 只需要在payload中设置是否可见，因此不需要外部数据。
+/**	
+	for (int i = 0; i < 3; ++i) {
+		m_sbtHelper.AddHitGroup(L"HitGroup", {(void*)(m_perInstanceConstantBuffers[i]->GetGPUVirtualAddress())});
+	}
+	// The plane also uses a constant buffer for its vertex colors
+	m_sbtHelper.AddHitGroup(L"HitGroup",{(void*)(m_perInstanceConstantBuffers[0]->GetGPUVirtualAddress())});
+*/
 
 	// Compute the size of the SBT given the number of shaders and their
 	// parameters
@@ -1075,4 +1073,73 @@ void D3D12HelloTriangle::CreateTriangleVB() {
 	m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
 	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
 	m_vertexBufferView.SizeInBytes = vertexBufferSize;
+}
+
+// #DXR Extra: Per-Instance Data
+//-----------------------------------------------------------------------------
+// 
+void D3D12HelloTriangle::CreateGlobalConstantBuffer()
+{ // 由于HLSL包裹规则，我们创建了 9个float4 的 CB (each needs to start on a 16-byte boundary)
+	XMVECTOR bufferData[] = { 
+		// A 
+		XMVECTOR{1.0f, 0.0f, 0.0f, 1.0f}, 
+		XMVECTOR{0.7f, 0.4f, 0.0f, 1.0f}, 
+		XMVECTOR{0.4f, 0.7f, 0.0f, 1.0f}, 
+		// B 
+		XMVECTOR{0.0f, 1.0f, 0.0f, 1.0f}, 
+		XMVECTOR{0.0f, 0.7f, 0.4f, 1.0f}, 
+		XMVECTOR{0.0f, 0.4f, 0.7f, 1.0f}, 
+		// C 
+		XMVECTOR{0.0f, 0.0f, 1.0f, 1.0f}, 
+		XMVECTOR{0.4f, 0.0f, 0.7f, 1.0f}, 
+		XMVECTOR{0.7f, 0.0f, 0.4f, 1.0f}, 
+	}; 
+	// 创建缓冲 
+	m_globalConstantBuffer = nv_helpers_dx12::CreateBuffer( 
+		m_device.Get(),
+		sizeof(bufferData),
+		D3D12_RESOURCE_FLAG_NONE, 
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nv_helpers_dx12::kUploadHeapProps); 
+	// 将CPU内存复制到GPU 
+	uint8_t* pData; 
+	ThrowIfFailed(m_globalConstantBuffer->Map(0, nullptr, (void**)&pData));
+	memcpy(pData, bufferData, sizeof(bufferData)); 
+	m_globalConstantBuffer->Unmap(0, nullptr);
+}
+
+// #DXR Extra: Per-Instance Data
+//-----------------------------------------------------------------------------
+// 
+void D3D12HelloTriangle::CreatePerInstanceConstantBuffers()
+{ 
+	// Due to HLSL packing rules, we create the CB with 9 float4 (each needs to start on a 16-byte boundary) 
+	XMVECTOR bufferData[] = { 
+		// A
+		XMVECTOR{1.0f, 0.0f, 0.0f, 1.0f}, 
+		XMVECTOR{1.0f, 0.4f, 0.0f, 1.0f}, 
+		XMVECTOR{1.f, 0.7f, 0.0f, 1.0f}, 
+		// B
+		XMVECTOR{0.0f, 1.0f, 0.0f, 1.0f},
+		XMVECTOR{0.0f, 1.0f, 0.4f, 1.0f},
+		XMVECTOR{0.0f, 1.0f, 0.7f, 1.0f},
+		// C
+		XMVECTOR{0.0f, 0.0f, 1.0f, 1.0f}, 
+		XMVECTOR{0.4f, 0.0f, 1.0f, 1.0f}, 
+		XMVECTOR{0.7f, 0.0f, 1.0f, 1.0f}, };
+	m_perInstanceConstantBuffers.resize(3); 
+	int i(0); 
+	for (auto& cb : m_perInstanceConstantBuffers) {
+		const uint32_t bufferSize = sizeof(XMVECTOR) * 3; 
+		cb = nv_helpers_dx12::CreateBuffer(
+			m_device.Get(), 
+			bufferSize, 
+			D3D12_RESOURCE_FLAG_NONE, 
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nv_helpers_dx12::kUploadHeapProps);
+		uint8_t* pData; 
+		ThrowIfFailed(cb->Map(0, nullptr, (void**)&pData));
+		memcpy(pData, &bufferData[i * 3], bufferSize);
+		cb->Unmap(0, nullptr); ++i;
+	}
 }
