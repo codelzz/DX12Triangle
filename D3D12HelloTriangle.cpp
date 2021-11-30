@@ -260,28 +260,17 @@ void D3D12HelloTriangle::LoadAssets()
 
 	// Create the vertex buffer.
 	{
-		// Define the geometry for a triangle.
 		/*
-		Vertex triangleVertices[] =
-		{
-			{ { 0.0f, 0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-			{ { 0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
-			{ { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
-		};
-		*/
-
+		// 定义三角形几何结构
 		Vertex triangleVertices[] = {
 			{{0.0f, 0.25f * m_aspectRatio, 0.0f}, {1.0f, 1.0f, 0.0f, 1.0f}}, 
 			{{0.25f, -0.25f * m_aspectRatio, 0.0f}, {0.0f, 1.0f, 1.0f, 1.0f}}, 
 			{{-0.25f, -0.25f * m_aspectRatio, 0.0f}, {1.0f, 0.0f, 1.0f, 1.0f}} 
 		};
-
 		const UINT vertexBufferSize = sizeof(triangleVertices);
-
-		// Note: using upload heaps to transfer static data like vert buffers is not 
-		// recommended. Every time the GPU needs it, the upload heap will be marshalled 
-		// over. Please read up on Default Heap usage. An upload heap is used here for 
-		// code simplicity and because there are very few verts to actually transfer.
+		// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
+		// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
+		// 适用于简化代码，并且只有很少的 verts 被实际转移。
 		ThrowIfFailed(m_device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 			D3D12_HEAP_FLAG_NONE,
@@ -290,17 +279,25 @@ void D3D12HelloTriangle::LoadAssets()
 			nullptr,
 			IID_PPV_ARGS(&m_vertexBuffer)));
 
-		// Copy the triangle data to the vertex buffer.
+		// 将三角形数据复制到顶点缓冲
 		UINT8* pVertexDataBegin;
 		CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
 		ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
 		memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
 		m_vertexBuffer->Unmap(0, nullptr);
 
-		// Initialize the vertex buffer view.
+		// 初始化顶点缓冲视图
 		m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
 		m_vertexBufferView.StrideInBytes = sizeof(Vertex);
 		m_vertexBufferView.SizeInBytes = vertexBufferSize;
+		*/
+
+		// 创建三角形顶点缓冲
+		CreateTriangleVB();
+
+		// #DXR - Per Instance
+		// 创建地平面顶点缓冲, 与上述三角形缓冲类似
+		CreatePlaneVB();
 	}
 
 	// Create synchronization objects and wait until assets have been uploaded to the GPU.
@@ -390,6 +387,10 @@ void D3D12HelloTriangle::PopulateCommandList() {
 		m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
 		m_commandList->DrawInstanced(3, 1, 0, 0);
+		// #DXR Extra: Per-Instance Data
+		// 与光追相似，可视化地平面
+		m_commandList->IASetVertexBuffers(0, 1, &m_planeBufferView);
+		m_commandList->DrawInstanced(6, 1, 0, 0);
 	}
 	else 
 	{
@@ -558,64 +559,58 @@ D3D12HelloTriangle::AccelerationStructureBuffers D3D12HelloTriangle::CreateBotto
 	return buffers;
 }
 
-//-----------------------------------------------------------------------------
+//---CreateTopLevelAS-----------------------------------------------------------
 // 
-// Create the main acceleration structure that holds all instances of the scene.
-// Similarly to the bottom-level AS generation, it is done in 3 steps: gathering
-// the instances, computing the memory requirements for the AS, and building the
-// AS itself
+// 创建一个主要加速结构来持有场景中所有的实例。与 BLAS 的生成类似，其通过三个步骤完成：
+// 1. 获取实例
+// 2. 计算加速结构所需要的内存
+// 3. 构造加速结构
 // 
-// The top level acceleration structure (TLAS) can be seen as an acceleration structure 
-// over acceleration structures, which aims at optimizing the search for ray intersections
-// in any of the underlying BLAS. A TLAS can instantiate the same BLAS multiple times, 
-// using per-instance matrices to render them at various world-space positions. 
+// TLAS 可以被看成在加速结构上的加速结构，其致力于优化光线与任意底层 BLAS 交点的查询。一个
+// TLAS 可以反复实例化同一个 BLAS 多次，并利用 per-instance matrices 在不同的世界空间位置
+// 来渲染他们。
 // 
-// In the example, we call CreateTopLevelAS and pass an array of two elements (pair):
-//	* the resource pointer to the BLAS
-//	* the matrix to position the object
+// 在本例中，我们调用 CreateTopLevelAS 来传递一个两个元素的数组：
+// * 一个指向 BLAS 的资源指针
+// * object 的 position matrix
 // 
-// This method is very similar in structure to CreateBottomLevelAS, with the same 3 steps: 
-//	1. gathering the input data
-//	2. computing the AS buffer sizes
-//	3. generating the actual TLAS.
+// 然而，TLAS 需要额外的缓冲来持有每个实例的 description。ComputeASBufferSizes 方法通过调
+// 用 ID3D12Device5::GetRaytracingAccelerationStructurePrebuildInfo 提供了临时和结果缓
+// 冲的大小，并从 instance descriptor D3D12_RAYTRACING_INSTANCE_DESC 中计算出 instance
+// buffer 大小和 instance 数量。
 // 
-// However, the TLAS requires an additional buffer holding the descriptions of each instance. 
-// The ComputeASBufferSizes method provides the sizes of the scratch and result buffers by 
-// calling ID3D12Device5::GetRaytracingAccelerationStructurePrebuildInfo, and computes the 
-// size of the instance buffers from the size of the instance descriptor 
-// D3D12_RAYTRACING_INSTANCE_DESC and the number of instances. As for the BLAS, the scratch
-// and result buffers are directly allocated in GPU memory, on the default heap. The instance 
-// descriptors buffer will need to be mapped within the helper, and has to be allocated on the 
-// upload heap. Once the buffers are allocated, the Generate call fills in the instance descriptions
-// buffer and a descriptor of the building work to be done, with a 
-// D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL type. This descriptor is then passed to 
-// ID3D12GraphicsCommandList4::BuildRaytracingAccelerationStructure which builds an acceleration 
-// structure holding all the instances.
+// 与 BLAS 相似，临时和结果缓冲都被直接分配到 GPU 内存中，在默认堆里。Instance descriptors buffer
+// 需要在 helper 中完成映射，并需要分配与 upload 堆。一旦完成缓冲分配，生成call 使用 
+// D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL 类型填入 instance descriptions buffer 
+// 和所需要完成构建的工作的 descriptor。该 descriptor 将被传递到 
+// ID3D12GraphicsCommandList4::BuildRaytracingAccelerationStructure 来构建持有所有实例的
+// 加速结构。
 //
-void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3D12Resource>, DirectX::XMMATRIX>>& instances // pair of bottom level AS and matrix of the instance
-) 
-{ 
-	// Gather all the instances into the builder helper 
+void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3D12Resource>, DirectX::XMMATRIX>>& instances) { 
+	// 1. 获取所有实例到 m_topLevelASGenerator 中
 	for (size_t i = 0; i < instances.size(); i++) 
 	{ 
-		m_topLevelASGenerator.AddInstance(instances[i].first.Get(), instances[i].second, static_cast<UINT>(i), static_cast<UINT>(0));
+		m_topLevelASGenerator.AddInstance(
+			instances[i].first.Get(), 
+			instances[i].second, 
+			static_cast<UINT>(i) /*实例ID，可通过DXR内置方法InstanceID()在hlsl中获取该值*/,
+			static_cast<UINT>(0));
 	} 
-	// As for the bottom-level AS, the building the AS requires some scratch space 
-	// to store temporary data in addition to the actual AS. In the case of the 
-	// top-level AS, the instance descriptors also need to be stored in GPU
-	// memory. This call outputs the memory requirements for each (scratch, 
-	// results, instance descriptors) so that the application can allocate the 
-	// corresponding memory 
+	// 与 BLAS 类似，构造加速结构需要一些临时空间(scratch space)来存储临时数据以创建实际的加速结构。
+	// 在 TLAS 情景下，instance descriptor 同样需要被存储到 GPU 内存中。该方法输出了每个 (scratch
+	// ,result, instance descriptor) 的内存需求，这样程序可以分配相应的内存。
 	UINT64 scratchSize, resultSize, instanceDescsSize; 
-	m_topLevelASGenerator.ComputeASBufferSizes(m_device.Get(), true, &scratchSize, &resultSize, &instanceDescsSize);
-	// Create the scratch and result buffers. Since the build is all done on GPU, 
-	// those can be allocated on the default heap 
-	m_topLevelASBuffers.pScratch = nv_helpers_dx12::CreateBuffer(m_device.Get(), 
+	m_topLevelASGenerator.ComputeASBufferSizes(
+		m_device.Get(), true, &scratchSize, &resultSize, &instanceDescsSize);
+	// 创建临时和结果缓冲。由于构造在GPU中已完成，这些可以直接分配在默认堆中。
+	m_topLevelASBuffers.pScratch = nv_helpers_dx12::CreateBuffer(
+		m_device.Get(), 
 		scratchSize, 
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 
 		nv_helpers_dx12::kDefaultHeapProps);
-	m_topLevelASBuffers.pResult = nv_helpers_dx12::CreateBuffer( m_device.Get(), 
+	m_topLevelASBuffers.pResult = nv_helpers_dx12::CreateBuffer( 
+		m_device.Get(), 
 		resultSize, 
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 
 		D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 
@@ -632,33 +627,45 @@ void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3
 	// can build the acceleration structure. Note that in the case of the update 
 	// we also pass the existing AS as the 'previous' AS, so that it can be 
 	// refitted in place. 
-	m_topLevelASGenerator.Generate(m_commandList.Get(), m_topLevelASBuffers.pScratch.Get(), m_topLevelASBuffers.pResult.Get(), m_topLevelASBuffers.pInstanceDesc.Get());
+	m_topLevelASGenerator.Generate(
+		m_commandList.Get(), 
+		m_topLevelASBuffers.pScratch.Get(), 
+		m_topLevelASBuffers.pResult.Get(), 
+		m_topLevelASBuffers.pInstanceDesc.Get());
 }
 
-//-----------------------------------------------------------------------------
+//---CreateAccelerationStructures----------------------------------------------------------
 // 
-// Combine the BLAS and TLAS builds to construct the entire acceleration
-// structure required to raytrace the scene
-//
-// The CreateAccelerationStructures function calls AS builders for the bottom and the top, 
-// and store the generated structures. Note that while we only keep resulting BLAS of the 
-// triangle and discard the scratch space, we store all buffers for the TLAS into 
-// m_topLevelASBuffers in anticipation of the handling of dynamic scenes, where the scratch 
-// space will be used repeatedly. This method first fills the command list with the build
-// orders for the bottom-level acceleration structures. For each BLAS, the helper introduces 
-// a resource barrier D3D12_RESOURCE_BARRIER_TYPE_UAV to ensure the BLAS can be queried within
-// the same command list. This is required as the top-level AS is also built in that command 
-// list. After enqueuing the AS build calls, we execute the command list immediately by calling
-// ExecuteCommandLists and using a fence to flush the command list before starting rendering.
+// 结合 Bottom Level Acceleration Structure (BLAS) 和 Top-Level Acceleration Structure (TLAS)
+// 来构建光追场景所需要的完整加速结构 (AS)
+// 
+// 该方法调用 AS builds 来构造 BLAS 和 TLAS 并且保存所生成的结构。虽然我们仅保留三角形的 BLAS 结构
+// 并舍弃暂存空间(scratch space) ，我们保存了所有 TLAS 的缓冲到 m_topLevelASBuffers 预期处理动态
+// 场景，其中暂存空间将被反复使用。
+// 
+// 该方法首先用构建 BLAS 的命令填充 command list。对于每个 BLAS，helper 引入了一个资源屏障
+// D3D12_RESOURCE_BARRIER_TYPE_UAV 来确保 BLAS 可以在同个 command list 被请求。正如 TLAS 同样在
+// 该 command list 中，这是必须的。
+// 
+// 在请求 AS build 后，我们通过 ExecuteCommandLists 立即执行了 command list，并使用了一个 fence
+// 在开始渲染前刷新 command list。
 void D3D12HelloTriangle::CreateAccelerationStructures() { 
-	// 从 triangle vertex buffer 构造 bottom-level AS 
+	// 从 triangle vertex buffer 构造 BLAS 
 	AccelerationStructureBuffers bottomLevelBuffers = CreateBottomLevelAS({{m_vertexBuffer.Get(), 3}}); 
+	// 从 plan vertex buffer 构造 BLAS
+	AccelerationStructureBuffers planeBottomLevelBuffers = CreateBottomLevelAS({ {m_planeBuffer.Get(), 6} });
 
-	// 只需要单一实例
-	m_instances = {{bottomLevelBuffers.pResult, XMMatrixIdentity()}}; 
+	m_instances = { 
+		// # DXR Extra：三个三角形实例
+		{bottomLevelBuffers.pResult, XMMatrixIdentity()}, 
+		{bottomLevelBuffers.pResult, XMMatrixTranslation(.6f, 0, 0)}, 
+		{bottomLevelBuffers.pResult, XMMatrixTranslation(-.6f, 0, 0)}, 
+		// #DXR Extra：一个平面实例 
+		{planeBottomLevelBuffers.pResult, XMMatrixTranslation(0, 0, 0)}
+	};
+
 	CreateTopLevelAS(m_instances); 
-
-	// Flush the command list and wait for it to finish 
+	// 刷新 command list 并等待完成 
 	m_commandList->Close();
 	ID3D12CommandList *ppCommandLists[] = {m_commandList.Get()};
 	m_commandQueue->ExecuteCommandLists(1, ppCommandLists);
@@ -668,16 +675,16 @@ void D3D12HelloTriangle::CreateAccelerationStructures() {
 	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
 	WaitForSingleObject(m_fenceEvent, INFINITE);
 
-	// Once the command list is finished executing, reset it to be reused for rendering 
+	// 当 command list 完成执行，将其重置用于渲染
 	ThrowIfFailed( m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get())); 
-
-	// Store the AS buffers. The rest of the buffers will be released once we exit the function
+	// 保存 BLAS 缓冲。剩余的缓冲将会在退出方程后释放
 	m_bottomLevelAS = bottomLevelBuffers.pResult;
 }
 
 // ## Raytracing Pipeline
 
-//-----------------------------------------------------------------------------
+//---CreateRayGenSignature----------------------------------------------------
+// 
 // ray generation shader 需要访问两种资源: 
 //	* the raytracing output
 //	* the top-level acceleration structure (TLAS)
@@ -990,4 +997,82 @@ void D3D12HelloTriangle::OnMouseMove(UINT8 wParam, UINT32 lParam) {
 	inputs.shift = GetAsyncKeyState(VK_SHIFT);
 	inputs.alt = GetAsyncKeyState(VK_MENU); 
 	nv_helpers_dx12::CameraManip.mouseMove(-GET_X_LPARAM(lParam), -GET_Y_LPARAM(lParam), inputs);
+}
+
+// #DXR Extra: Per-Instance Data
+//---CreatePlaneVB-------------------------------------------------------------
+//
+// 给平面创建顶点缓冲（vertex buffer,VB）
+//
+void D3D12HelloTriangle::CreatePlaneVB() {
+	// 定义平面几何结构
+	Vertex planeVertices[] = { 
+		{{-1.5f, -.8f, 01.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 0 
+		{{-1.5f, -.8f, -1.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 1 
+		{{01.5f, -.8f, 01.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 2 
+		{{01.5f, -.8f, 01.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 2 
+		{{-1.5f, -.8f, -1.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 1 
+		{{01.5f, -.8f, -1.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}  // 4 
+	}; 
+	const UINT planeBufferSize = sizeof(planeVertices); 
+	// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
+	// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
+	// 适用于简化代码，并且只有很少的 verts 被实际转移。
+	CD3DX12_HEAP_PROPERTIES heapProperty =
+		CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	CD3DX12_RESOURCE_DESC bufferResource =
+		CD3DX12_RESOURCE_DESC::Buffer(planeBufferSize);
+	ThrowIfFailed(m_device->CreateCommittedResource(
+		&heapProperty, D3D12_HEAP_FLAG_NONE, &bufferResource,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+		IID_PPV_ARGS(&m_planeBuffer)));
+
+	// 将三角形数据复制到顶点缓冲（vertex buffer）
+	UINT8* pVertexDataBegin;
+	CD3DX12_RANGE readRange(0, 0);	// 我们并不打算从CPU的这个资源读取数据。
+	ThrowIfFailed(m_planeBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+	memcpy(pVertexDataBegin, planeVertices, sizeof(planeVertices));
+	m_planeBuffer->Unmap(0, nullptr);
+
+	// 初始化顶点缓存视图（vertex buffer view）.
+	m_planeBufferView.BufferLocation = m_planeBuffer->GetGPUVirtualAddress();
+	m_planeBufferView.StrideInBytes = sizeof(Vertex);
+	m_planeBufferView.SizeInBytes = planeBufferSize;
+}
+
+// #DXR Extra: Per-Instance Data
+//---CreatePlaneVB-------------------------------------------------------------
+//
+// 给平面创建顶点缓冲（vertex buffer,VB）
+//
+void D3D12HelloTriangle::CreateTriangleVB() {
+	// 定义三角形几何结构
+	Vertex triangleVertices[] = {
+		{{0.0f, 0.25f * m_aspectRatio, 0.0f}, {1.0f, 1.0f, 0.0f, 1.0f}},
+		{{0.25f, -0.25f * m_aspectRatio, 0.0f}, {0.0f, 1.0f, 1.0f, 1.0f}},
+		{{-0.25f, -0.25f * m_aspectRatio, 0.0f}, {1.0f, 0.0f, 1.0f, 1.0f}}
+	};
+	const UINT vertexBufferSize = sizeof(triangleVertices);
+	// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
+	// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
+	// 适用于简化代码，并且只有很少的 verts 被实际转移。
+	ThrowIfFailed(m_device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&m_vertexBuffer)));
+
+	// 将三角形数据复制到顶点缓冲
+	UINT8* pVertexDataBegin;
+	CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
+	ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+	memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
+	m_vertexBuffer->Unmap(0, nullptr);
+
+	// 初始化顶点缓冲视图
+	m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+	m_vertexBufferView.SizeInBytes = vertexBufferSize;
 }

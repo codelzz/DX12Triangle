@@ -7,12 +7,14 @@
 // IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR
 // PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
 //
-// DX12 Raytracing Basic - Part 1 
+// DX12 Raytracing - Part 1 
 //	https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial-part-1
-// DX12 Raytracing Basic - Part 2
+// DX12 Raytracing - Part 2
 //  https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial-part-2
 // DX12 Raytracing Extras - Perspective Camera 
 //	https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial/extra/dxr_tutorial_extra_perspective
+// DX12 Raytracing Extras - Per Instance Data
+//  https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial/extra/dxr_tutorial_extra_per_instance_data
 //*********************************************************
 
 #pragma once
@@ -175,7 +177,18 @@ private:
 	ComPtr<ID3D12DescriptorHeap > m_constHeap;	// rasterization
 	ComPtr<ID3D12Resource > m_cameraBuffer;		// raytracing
 	uint32_t m_cameraBufferSize = 0;
-	// #DXR Extra: Perspective Camera ++ 
+
+	// 鼠标响应事件 
 	void OnButtonDown(UINT32 lParam); 
 	void OnMouseMove(UINT8 wParam, UINT32 lParam);
+
+	// #DXR Extra: Per-Instance Data
+	// 用于创建平面
+	ComPtr<ID3D12Resource> m_planeBuffer;
+	D3D12_VERTEX_BUFFER_VIEW m_planeBufferView;
+	void CreatePlaneVB();
+
+	// #DXR
+	// 创建三角形顶点缓冲
+	void CreateTriangleVB();
 };

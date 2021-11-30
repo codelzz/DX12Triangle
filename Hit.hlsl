@@ -26,13 +26,22 @@ StructuredBuffer<STriVertex> BTriVertex : register(t0);
 void ClosestHit(inout HitInfo payload, Attributes attrib) 
 {
     // 我们使用内置的 PrimitiveIndex() 获取我们击中的三角形索引
-    float3 barycentrics =
-      float3(1.f - attrib.bary.x - attrib.bary.y, attrib.bary.x, attrib.bary.y);
+    float3 barycentrics = float3(1.f - attrib.bary.x - attrib.bary.y, attrib.bary.x, attrib.bary.y);
 
     uint vertId = 3 * PrimitiveIndex();
-    float3 hitColor = BTriVertex[vertId + 0].color * barycentrics.x +
-                      BTriVertex[vertId + 1].color * barycentrics.y +
-                      BTriVertex[vertId + 2].color * barycentrics.z;
+    // #DXR Extra: Per-Instance Data
+    // 这里 DXR 提供了内置 InstanceID() 方程用于返回我们在 CreateTopLevelAS 
+    // 中 AddInstance 传入第三个参数
+
+    // #DXR Extra: Per-Instance Data
+    float3 hitColor = float3(0.6, 0.7, 0.6);
+    // Shade only the first 3 instances (triangles)
+    if (InstanceID() < 3)
+    {
+        // #DXR Extra: Per-Instance Data
+        hitColor = BTriVertex[vertId + 0].color * barycentrics.x +
+                   BTriVertex[vertId + 1].color * barycentrics.y +
+                   BTriVertex[vertId + 2].color * barycentrics.z;
+    }
     payload.colorAndDistance = float4(hitColor, RayTCurrent());
-    // payload.colorAndDistance = float4(1, 0, 0, RayTCurrent());
 }
