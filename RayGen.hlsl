@@ -30,14 +30,14 @@ cbuffer CameraParams : register(b0)
 
 [shader("raygeneration")] 
 void RayGen() {
-    // 初始化光线 payload 
+     
     HitInfo payload;
-    payload.colorAndDistance = float4(0.9, 0.6, 0.2, 1);
+    payload.colorAndDistance = float4(0, 0, 0, 0);      // 初始化光线 payload
 
-    // 获取被调度的 2D 网格工作项的位置 (一般映射为像素，因此这个可表达像素坐标).
-    uint2 launchIndex = DispatchRaysIndex();            // 获取当前像素 2D 坐标
-    float2 dims = float2(DispatchRaysDimensions().xy);  // 获取需要渲染的图片尺寸
-    float2 d = (((launchIndex.xy + 0.5f) / dims.xy) * 2.f - 1.f); // 至此，我们可以推断出归一化后浮点像素坐标 d
+    // 获取被调度的 2D 网格工作项的位置(一般映射为像素，可表示像素坐标).
+    uint2 launchIndex = DispatchRaysIndex();                        // 获取当前像素 2D 坐标
+    float2 dims = float2(DispatchRaysDimensions().xy);              // 获取需要渲染的图片尺寸
+    float2 d = (((launchIndex.xy + 0.5f) / dims.xy) * 2.f - 1.f);   // 至此，我们可以推断出归一化后浮点像素坐标 d
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // 已知默认相机位置为 (0,0,1) 并朝向 (0,0,-1), 我们可以设置一个 ray discriptor
     // RayDesc 代表通过将光线原点 x,y 坐标偏移归一化的浮点像素坐标来表示直接穿过
@@ -91,7 +91,7 @@ void RayGen() {
         // visibility value for shadow rays. This sample has only one miss shader, hence an index 0 
         0,
         
-    // Parameter name: Ray 
+        // Parameter name: Ray 
         // Ray information to trace 
         ray, 
         

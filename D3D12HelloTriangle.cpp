@@ -67,16 +67,15 @@ void D3D12HelloTriangle::OnInit()
 	CreateRaytracingPipeline();
 
 	// #DXR Extra: Per-Instance Data
-	// 对每个实例单独创建常量缓冲
+	// 创建实例常量缓冲
 	CreatePerInstanceConstantBuffers();
 
 	// #DXR Extra: Per-Instance Data
-	// 创建一个常量缓冲，其包含每个三角形实例中每个顶点颜色
+	// 创建全局常量缓冲，其包含每个三角形实例中每个顶点颜色
 	CreateGlobalConstantBuffer();
 
 	// ## Raytracing Resource
-	// Allocate the buffer storing the raytracing output, with the same dimensions
-	// as the target image
+	// 创建存储光追输出缓冲，其维度与目标image一致
 	CreateRaytracingOutputBuffer();
 
 	// # DXR Extra - Perspective Camera
@@ -561,15 +560,17 @@ D3D12HelloTriangle::AccelerationStructureBuffers D3D12HelloTriangle::CreateBotto
 //
 void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3D12Resource>, DirectX::XMMATRIX>>& instances) { 
 	// 1. 获取所有实例到 m_topLevelASGenerator 中
+	// # DXR - per isntance data
+	// 现在实例都是相互独立，我们需要将实例与其自己在SBT中的 hit 相关联。
 	for (size_t i = 0; i < instances.size(); i++) 
 	{ 
 		m_topLevelASGenerator.AddInstance(
 			instances[i].first.Get(), 
 			instances[i].second, 
-			static_cast<UINT>(i)   /*实例ID，可通过DXR内置方法InstanceID()在hlsl中获取该值*/,
-			static_cast<UINT>(0)); /* 这里我们需要将实例与其自己在SBT中的Hit group关联，
-								   这样 i-th 三角形将会调用第一个在SBT中定义的hitgroup，
-								   其自生引用m_perInstanceConstantBuffers[i] */
+			static_cast<UINT>(i)   /* 实例ID，可通过DXR内置方法InstanceID()在hlsl中获取该值 */,
+			static_cast<UINT>(i)); /* 这里我们需要将实例与其自己在SBT中的Hit group关联，
+								      这样 i-th 三角形将会调用第一个在SBT中定义的hitgroup，
+									  其自生引用 m_perInstanceConstantBuffers[i] */
 	} 
 
 	// 与 BLAS 类似，构造加速结构需要一些临时空间(scratch space)来存储临时数据以创建实际的加速结构。
@@ -621,7 +622,7 @@ void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3
 // 
 // 该方法首先用构建 BLAS 的命令填充 command list。对于每个 BLAS，helper 引入了一个资源屏障
 // D3D12_RESOURCE_BARRIER_TYPE_UAV 来确保 BLAS 可以在同个 command list 被请求。正如 TLAS 同样在
-// 该 command list 中，这是必须的。
+// 该 command list 中，这是必须的。F
 // 
 // 在请求 AS build 后，我们通过 ExecuteCommandLists 立即执行了 command list，并使用了一个 fence
 // 在开始渲染前刷新 command list。
@@ -636,11 +637,11 @@ void D3D12HelloTriangle::CreateAccelerationStructures() {
 		{bottomLevelBuffers.pResult, XMMatrixIdentity()}, 
 		{bottomLevelBuffers.pResult, XMMatrixTranslation(.6f, 0, 0)}, 
 		{bottomLevelBuffers.pResult, XMMatrixTranslation(-.6f, 0, 0)}, 
-		// #DXR Extra：一个平面实例 
+		// # DXR Extra：一个平面实例 
 		{planeBottomLevelBuffers.pResult, XMMatrixTranslation(0, 0, 0)}
 	};
-
 	CreateTopLevelAS(m_instances); 
+
 	// 刷新 command list 并等待完成 
 	m_commandList->Close();
 	ID3D12CommandList *ppCommandLists[] = {m_commandList.Get()};
@@ -676,7 +677,7 @@ ComPtr<ID3D12RootSignature> D3D12HelloTriangle::CreateRayGenSignature() {
 	nv_helpers_dx12::RootSignatureGenerator rsc;
 	rsc.AddHeapRangesParameter(
 		{{0 /*u0*/, 1 /*1 descriptor */, 0 /*use the implicit register space 0*/, D3D12_DESCRIPTOR_RANGE_TYPE_UAV /* UAV representing the output buffer*/, 0 /*heap slot where the UAV is defined*/}, 
-		 {0 /*t0*/, 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV /*Top-level acceleration structure*/, 1}, 
+		 {0 /*t0*/, 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV /* TLAS */, 1}, 
 		 {0 /*b0*/, 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_CBV /*Camera parameters*/, 2} 
 		});
 	return rsc.Generate(m_device.Get(), true);
@@ -729,7 +730,9 @@ void D3D12HelloTriangle::CreateRaytracingPipeline() {
 	// [Question] 为什么在 HLSL 中symbols为小写且不匹配 C++ symbols
 	pipeline.AddLibrary(m_rayGenLibrary.Get(), { L"RayGen" });
 	pipeline.AddLibrary(m_missLibrary.Get(), { L"Miss" });
-	pipeline.AddLibrary(m_hitLibrary.Get(), { L"ClosestHit" });
+	// pipeline.AddLibrary(m_hitLibrary.Get(), { L"ClosestHit" });
+	// #DXR Extra: Per-Instance Data
+	pipeline.AddLibrary(m_hitLibrary.Get(), { L"ClosestHit", L"PlaneClosestHit" });
 
 	// 要能够使用这些 shader，每个 DX12 shader 需要一个 root signature 定义所需要访问的
 	// parameters 和 buffers
@@ -749,6 +752,8 @@ void D3D12HelloTriangle::CreateRaytracingPipeline() {
 	
 	// 对于 triangles 的 Hit group，shader 只需要插入 vertex colors 
 	pipeline.AddHitGroup(L"HitGroup", L"ClosestHit");
+	// #DXR Extra: Per-Instance Data
+	pipeline.AddHitGroup(L"PlaneHitGroup", L"PlaneClosestHit");
 
 	// 这里我们将 root signature 与每个 shader 关联。我们可以 explicity 展示一些 shader 共享一些 root signature
 	// (如. Miss and ShadowMiss)。Hit shaders 仅指代 Hit group, 这意味着 底层交点，any-hit 和 closest-hit shaders
@@ -756,6 +761,8 @@ void D3D12HelloTriangle::CreateRaytracingPipeline() {
 	pipeline.AddRootSignatureAssociation(m_rayGenSignature.Get(), { L"RayGen" });
 	pipeline.AddRootSignatureAssociation(m_missSignature.Get(), { L"Miss" });
 	pipeline.AddRootSignatureAssociation(m_hitSignature.Get(), { L"HitGroup" });
+	// #DXR Extra: Per-Instance Data
+	pipeline.AddRootSignatureAssociation(m_hitSignature.Get(), { L"HitGroup", L"PlaneHitGroup" });
 
 	// payload size 定义了 rays 所能携带的最大数据量，即，shaders间交换的数据，如 HLSL 代码中 HitInfo
 	// structure。将该值保持在最低尤为关键，否者会产生过高的内存消耗和缓存垃圾。
@@ -849,72 +856,70 @@ void D3D12HelloTriangle::CreateShaderResourceHeap() {
 	m_device->CreateConstantBufferView(&cbvDesc, srvHandle);
 }
 
-//-----------------------------------------------------------------------------
+//---CreateShaderBindingTable---------------------------------------------------
 //
-// The Shader Binding Table (SBT) is the cornerstone of the raytracing setup:
-// this is where the shader resources are bound to the shaders, in a way that
-// can be interpreted by the raytracer on GPU. In terms of layout, the SBT
-// contains a series of shader IDs with their resource pointers. The SBT
-// contains the ray generation shader, the miss shaders, then the hit groups.
-// Using the helper class, those can be specified in arbitrary order.
+// 着色器绑定表（shader binding table, SBT）是光追设置的基石：在这里，shader resource
+// 与 shader 以能被 GPU 光追所解析的方式绑定。在布局方面，SBT 包含了一系列的着色器 ID 及
+// 他们的资源指针。SBT 包含了
+// * ray generation shader
+// * miss shader
+// * hit group
+// 利用 helper 类，这些可以以任意顺序指定
 //
 void D3D12HelloTriangle::CreateShaderBindingTable() {
-	// The SBT helper class collects calls to Add*Program.  If called several
-	// times, the helper must be emptied before re-adding shaders.
+	// SBT 帮助类包含对 Add* 程序的调用。如果被反复调用，帮助类必须得在重新加入着色器前清空。
 	m_sbtHelper.Reset();
 
-	// The pointer to the beginning of the heap is the only parameter required by
-	// shaders without root parameters
-	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle =
-		m_srvUavHeap->GetGPUDescriptorHandleForHeapStart();
+	// 指向堆开头的指针是没有根参数的着色器唯一需要的参数
+	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle =	m_srvUavHeap->GetGPUDescriptorHandleForHeapStart();
 
-	// The helper treats both root parameter pointers and heap pointers as void*,
-	// while DX12 uses the
-	// D3D12_GPU_DESCRIPTOR_HANDLE to define heap pointers. The pointer in this
-	// struct is a UINT64, which then has to be reinterpreted as a pointer.
+	// 帮助类将 root parameter pointers 和 heap pointers 都视为 void*，且 DX12 使用
+	// D3D12_GPU_DESCRIPTOR_HANDLE 来定义 heap pointers. 在这个结构体的指针是 UINT64*
+	// 我们需要将其 reinterpreted
 	auto heapPointer = reinterpret_cast<UINT64*>(srvUavHeapHandle.ptr);
 
-	// The ray generation only uses heap data
+	// ray generation shader 只需要堆数据
 	m_sbtHelper.AddRayGenerationProgram(L"RayGen", { heapPointer });
 
-	// The miss and hit shaders do not access any external resources: instead they
-	// communicate their results through the ray payload
+	// miss 和 hit shader 并不需要访问外部数据，他们是通过 ray payload 来通信
 	m_sbtHelper.AddMissProgram(L"Miss", {});
 
 	// 添加三角形碰撞 shader 
 	// 这里需要将GPU内存中的这个缓冲地址传递给 Hit shader
-	
-	m_sbtHelper.AddHitGroup(
-		L"HitGroup",
-		{(void*)(m_vertexBuffer->GetGPUVirtualAddress()),
-		 (void*)m_globalConstantBuffer->GetGPUVirtualAddress() // #DXR Extra: Per-Instance Data 常量缓冲数据 
-		}
-	); 
+	// 
 	// #DXR Extra: Per-Instance Data
-	// 我们有三个三角形，=他们中的每个都需要访问其自己的常量缓冲作为root parameter在其primary hit shader。
+	// 我们有三个三角形，他们中的每个都需要访问其自己的常量缓冲作为root parameter在其primary hit shader。
 	// shadow hit 只需要在payload中设置是否可见，因此不需要外部数据。
-/**	
-	for (int i = 0; i < 3; ++i) {
-		m_sbtHelper.AddHitGroup(L"HitGroup", {(void*)(m_perInstanceConstantBuffers[i]->GetGPUVirtualAddress())});
+	// 需要注意的是，这里每个instance都绑定其对应的 Hit Group，因此我们需要在每个hitgroup中都持有 m_vertexBuffer
+	for (int i = 0; i < 3; ++i) 
+	{
+		m_sbtHelper.AddHitGroup(
+			L"HitGroup",
+			{(void*)(m_vertexBuffer->GetGPUVirtualAddress()),
+			 // (void*)(m_globalConstantBuffer->GetGPUVirtualAddress()),
+			 (void*)(m_perInstanceConstantBuffers[i]->GetGPUVirtualAddress())
+			});
 	}
-	// The plane also uses a constant buffer for its vertex colors
-	m_sbtHelper.AddHitGroup(L"HitGroup",{(void*)(m_perInstanceConstantBuffers[0]->GetGPUVirtualAddress())});
-*/
 
-	// Compute the size of the SBT given the number of shaders and their
-	// parameters
+	// #DXR Extra: Per-Instance Data
+	// 添加地平面
+	m_sbtHelper.AddHitGroup(L"PlaneHitGroup", {});
+
+	// 给定shader和他们的参数，计算SBT的大小
 	uint32_t sbtSize = m_sbtHelper.ComputeSBTSize();
 
-	// Create the SBT on the upload heap. This is required as the helper will use
-	// mapping to write the SBT contents. After the SBT compilation it could be
-	// copied to the default heap for performance.
+	// 在 upload heap 中创建 SBT. 由于帮助类需要使用映射来编写 SBT 内容，这是必须的。
+	// 在 SBT 编译后，它可以被复制到 default heap 来提升性能
 	m_sbtStorage = nv_helpers_dx12::CreateBuffer(
-		m_device.Get(), sbtSize, D3D12_RESOURCE_FLAG_NONE,
-		D3D12_RESOURCE_STATE_GENERIC_READ, nv_helpers_dx12::kUploadHeapProps);
+		m_device.Get(), 
+		sbtSize, 
+		D3D12_RESOURCE_FLAG_NONE,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nv_helpers_dx12::kUploadHeapProps);
 	if (!m_sbtStorage) {
 		throw std::logic_error("Could not allocate the shader binding table");
 	}
-	// Compile the SBT from the shader and parameters info
+	// 编译 shader
 	m_sbtHelper.Generate(m_sbtStorage.Get(), m_rtStateObjectProps.Get());
 }
 
@@ -951,12 +956,6 @@ void D3D12HelloTriangle::UpdateCameraBuffer() {
 	std::vector<XMMATRIX> matrices(4); 
 	// 初始化 view matrix，理想情况下该矩阵基于用户的互动。用于光栅化的 lookat 和 
 	// perspective matrices 被定义来将世界向量变换到 [0,1]x[0,1]x[0,1] 相机空间
-	/* 
-	XMVECTOR Eye = XMVectorSet(1.5f, 1.5f, 1.5f, 0.0f);
-	XMVECTOR At = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
-	XMVECTOR Up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f); 
-	matrices[0] = XMMatrixLookAtRH(Eye, At, Up); 
-	*/
 	const glm::mat4& mat = nv_helpers_dx12::CameraManip.getMatrix(); 
 	memcpy(&matrices[0].r->m128_f32[0], glm::value_ptr(mat), 16 * sizeof(float));
 
@@ -1077,7 +1076,8 @@ void D3D12HelloTriangle::CreateTriangleVB() {
 
 // #DXR Extra: Per-Instance Data
 //-----------------------------------------------------------------------------
-// 
+// 创建全局常量缓冲 
+//
 void D3D12HelloTriangle::CreateGlobalConstantBuffer()
 { // 由于HLSL包裹规则，我们创建了 9个float4 的 CB (each needs to start on a 16-byte boundary)
 	XMVECTOR bufferData[] = { 
@@ -1094,7 +1094,7 @@ void D3D12HelloTriangle::CreateGlobalConstantBuffer()
 		XMVECTOR{0.4f, 0.0f, 0.7f, 1.0f}, 
 		XMVECTOR{0.7f, 0.0f, 0.4f, 1.0f}, 
 	}; 
-	// 创建缓冲 
+	// 创建全局常量缓冲 
 	m_globalConstantBuffer = nv_helpers_dx12::CreateBuffer( 
 		m_device.Get(),
 		sizeof(bufferData),
@@ -1110,36 +1110,41 @@ void D3D12HelloTriangle::CreateGlobalConstantBuffer()
 
 // #DXR Extra: Per-Instance Data
 //-----------------------------------------------------------------------------
-// 
-void D3D12HelloTriangle::CreatePerInstanceConstantBuffers()
-{ 
-	// Due to HLSL packing rules, we create the CB with 9 float4 (each needs to start on a 16-byte boundary) 
-	XMVECTOR bufferData[] = { 
+// 创建实例常量缓冲 
+//
+void D3D12HelloTriangle::CreatePerInstanceConstantBuffers() {
+	// Due to HLSL packing rules, we create the CB with 9 float4 (each needs to
+	// start on a 16-byte boundary)
+	XMVECTOR bufferData[] = {
 		// A
-		XMVECTOR{1.0f, 0.0f, 0.0f, 1.0f}, 
-		XMVECTOR{1.0f, 0.4f, 0.0f, 1.0f}, 
-		XMVECTOR{1.f, 0.7f, 0.0f, 1.0f}, 
+		XMVECTOR{1.0f, 0.0f, 0.0f, 1.0f},
+		XMVECTOR{1.0f, 0.4f, 0.0f, 1.0f},
+		XMVECTOR{1.0f, 0.7f, 0.0f, 1.0f},
+
 		// B
 		XMVECTOR{0.0f, 1.0f, 0.0f, 1.0f},
 		XMVECTOR{0.0f, 1.0f, 0.4f, 1.0f},
 		XMVECTOR{0.0f, 1.0f, 0.7f, 1.0f},
+
 		// C
-		XMVECTOR{0.0f, 0.0f, 1.0f, 1.0f}, 
-		XMVECTOR{0.4f, 0.0f, 1.0f, 1.0f}, 
-		XMVECTOR{0.7f, 0.0f, 1.0f, 1.0f}, };
-	m_perInstanceConstantBuffers.resize(3); 
-	int i(0); 
+		XMVECTOR{0.0f, 0.0f, 1.0f, 1.0f},
+		XMVECTOR{0.4f, 0.0f, 1.0f, 1.0f},
+		XMVECTOR{0.7f, 0.0f, 1.0f, 1.0f},
+	};
+	m_perInstanceConstantBuffers.resize(3);
+	int i(0);
 	for (auto& cb : m_perInstanceConstantBuffers) {
-		const uint32_t bufferSize = sizeof(XMVECTOR) * 3; 
+		const uint32_t bufferSize = sizeof(XMVECTOR) * 3;
 		cb = nv_helpers_dx12::CreateBuffer(
 			m_device.Get(), 
 			bufferSize, 
-			D3D12_RESOURCE_FLAG_NONE, 
-			D3D12_RESOURCE_STATE_GENERIC_READ,
+			D3D12_RESOURCE_FLAG_NONE,
+			D3D12_RESOURCE_STATE_GENERIC_READ, 
 			nv_helpers_dx12::kUploadHeapProps);
-		uint8_t* pData; 
+		uint8_t* pData;
 		ThrowIfFailed(cb->Map(0, nullptr, (void**)&pData));
 		memcpy(pData, &bufferData[i * 3], bufferSize);
-		cb->Unmap(0, nullptr); ++i;
+		cb->Unmap(0, nullptr);
+		++i;
 	}
 }
