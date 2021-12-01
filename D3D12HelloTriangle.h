@@ -7,12 +7,14 @@
 // IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR
 // PURPOSE, MERCHANTABILITY, OR NON-INFRINGEMENT.
 //
-// DX12 Raytracing Basic - Part 1 
+// DX12 Raytracing - Part 1 
 //	https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial-part-1
-// DX12 Raytracing Basic - Part 2
+// DX12 Raytracing - Part 2
 //  https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial-part-2
 // DX12 Raytracing Extras - Perspective Camera 
 //	https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial/extra/dxr_tutorial_extra_perspective
+// DX12 Raytracing Extras - Per Instance Data
+//  https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial/extra/dxr_tutorial_extra_per_instance_data
 //*********************************************************
 
 #pragma once
@@ -175,7 +177,29 @@ private:
 	ComPtr<ID3D12DescriptorHeap > m_constHeap;	// rasterization
 	ComPtr<ID3D12Resource > m_cameraBuffer;		// raytracing
 	uint32_t m_cameraBufferSize = 0;
-	// #DXR Extra: Perspective Camera ++ 
+
+	// 鼠标响应事件 
 	void OnButtonDown(UINT32 lParam); 
 	void OnMouseMove(UINT8 wParam, UINT32 lParam);
+	
+	// -----------------------------------------------------------------------------------
+	// #DXR Extra: Per-Instance Data
+	// 用于创建平面
+	ComPtr<ID3D12Resource> m_planeBuffer;
+	D3D12_VERTEX_BUFFER_VIEW m_planeBufferView;
+	void CreatePlaneVB();
+
+
+	// 常量缓冲（Constant Buffer）可以用于从CPU侧向shaders发送只读数据。这里，我们将会创建一个常
+	// 量缓冲包含颜色数据（其用于在shader中更改顶点数据）。
+	void D3D12HelloTriangle::CreateGlobalConstantBuffer();
+	ComPtr<ID3D12Resource> m_globalConstantBuffer;
+	
+	// 在现实的场景中，常量缓存对实例单独定义，这样常量缓冲可以被独立管理。	
+	void CreatePerInstanceConstantBuffers();
+	std::vector<ComPtr<ID3D12Resource>> m_perInstanceConstantBuffers;
+
+	// #DXR
+	// 创建三角形顶点缓冲
+	void CreateTriangleVB();
 };

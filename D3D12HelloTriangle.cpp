@@ -66,9 +66,16 @@ void D3D12HelloTriangle::OnInit()
 	// rays (ray payload)
 	CreateRaytracingPipeline();
 
+	// #DXR Extra: Per-Instance Data
+	// 创建实例常量缓冲
+	CreatePerInstanceConstantBuffers();
+
+	// #DXR Extra: Per-Instance Data
+	// 创建全局常量缓冲，其包含每个三角形实例中每个顶点颜色
+	CreateGlobalConstantBuffer();
+
 	// ## Raytracing Resource
-	// Allocate the buffer storing the raytracing output, with the same dimensions
-	// as the target image
+	// 创建存储光追输出缓冲，其维度与目标image一致
 	CreateRaytracingOutputBuffer();
 
 	// # DXR Extra - Perspective Camera
@@ -258,49 +265,11 @@ void D3D12HelloTriangle::LoadAssets()
 	// Create the command list.
 	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
-	// Create the vertex buffer.
+	// 创建顶点缓冲
 	{
-		// Define the geometry for a triangle.
-		/*
-		Vertex triangleVertices[] =
-		{
-			{ { 0.0f, 0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-			{ { 0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
-			{ { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
-		};
-		*/
-
-		Vertex triangleVertices[] = {
-			{{0.0f, 0.25f * m_aspectRatio, 0.0f}, {1.0f, 1.0f, 0.0f, 1.0f}}, 
-			{{0.25f, -0.25f * m_aspectRatio, 0.0f}, {0.0f, 1.0f, 1.0f, 1.0f}}, 
-			{{-0.25f, -0.25f * m_aspectRatio, 0.0f}, {1.0f, 0.0f, 1.0f, 1.0f}} 
-		};
-
-		const UINT vertexBufferSize = sizeof(triangleVertices);
-
-		// Note: using upload heaps to transfer static data like vert buffers is not 
-		// recommended. Every time the GPU needs it, the upload heap will be marshalled 
-		// over. Please read up on Default Heap usage. An upload heap is used here for 
-		// code simplicity and because there are very few verts to actually transfer.
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_vertexBuffer)));
-
-		// Copy the triangle data to the vertex buffer.
-		UINT8* pVertexDataBegin;
-		CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
-		ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
-		memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
-		m_vertexBuffer->Unmap(0, nullptr);
-
-		// Initialize the vertex buffer view.
-		m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
-		m_vertexBufferView.StrideInBytes = sizeof(Vertex);
-		m_vertexBufferView.SizeInBytes = vertexBufferSize;
+		CreateTriangleVB();	// 创建三角形顶点缓冲
+		// #DXR - Per Instance
+		CreatePlaneVB();    // 创建地平面顶点缓冲, 与上述三角形缓冲类似
 	}
 
 	// Create synchronization objects and wait until assets have been uploaded to the GPU.
@@ -390,6 +359,10 @@ void D3D12HelloTriangle::PopulateCommandList() {
 		m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
 		m_commandList->DrawInstanced(3, 1, 0, 0);
+		// #DXR Extra: Per-Instance Data
+		// 与光追相似，可视化地平面
+		m_commandList->IASetVertexBuffers(0, 1, &m_planeBufferView);
+		m_commandList->DrawInstanced(6, 1, 0, 0);
 	}
 	else 
 	{
@@ -558,64 +531,63 @@ D3D12HelloTriangle::AccelerationStructureBuffers D3D12HelloTriangle::CreateBotto
 	return buffers;
 }
 
-//-----------------------------------------------------------------------------
+//---CreateTopLevelAS-----------------------------------------------------------
 // 
-// Create the main acceleration structure that holds all instances of the scene.
-// Similarly to the bottom-level AS generation, it is done in 3 steps: gathering
-// the instances, computing the memory requirements for the AS, and building the
-// AS itself
+// 创建一个主要加速结构来持有场景中所有的实例。与 BLAS 的生成类似，其通过三个步骤完成：
+// 1. 获取实例
+// 2. 计算加速结构所需要的内存
+// 3. 构造加速结构
 // 
-// The top level acceleration structure (TLAS) can be seen as an acceleration structure 
-// over acceleration structures, which aims at optimizing the search for ray intersections
-// in any of the underlying BLAS. A TLAS can instantiate the same BLAS multiple times, 
-// using per-instance matrices to render them at various world-space positions. 
+// TLAS 可以被看成在加速结构上的加速结构，其致力于优化光线与任意底层 BLAS 交点的查询。一个
+// TLAS 可以反复实例化同一个 BLAS 多次，并利用 per-instance matrices 在不同的世界空间位置
+// 来渲染他们。
 // 
-// In the example, we call CreateTopLevelAS and pass an array of two elements (pair):
-//	* the resource pointer to the BLAS
-//	* the matrix to position the object
+// 在本例中，我们调用 CreateTopLevelAS 来传递一个两个元素的数组：
+// * 一个指向 BLAS 的资源指针
+// * object 的 position matrix
 // 
-// This method is very similar in structure to CreateBottomLevelAS, with the same 3 steps: 
-//	1. gathering the input data
-//	2. computing the AS buffer sizes
-//	3. generating the actual TLAS.
+// 然而，TLAS 需要额外的缓冲来持有每个实例的 description。ComputeASBufferSizes 方法通过调
+// 用 ID3D12Device5::GetRaytracingAccelerationStructurePrebuildInfo 提供了临时和结果缓
+// 冲的大小，并从 instance descriptor D3D12_RAYTRACING_INSTANCE_DESC 中计算出 instance
+// buffer 大小和 instance 数量。
 // 
-// However, the TLAS requires an additional buffer holding the descriptions of each instance. 
-// The ComputeASBufferSizes method provides the sizes of the scratch and result buffers by 
-// calling ID3D12Device5::GetRaytracingAccelerationStructurePrebuildInfo, and computes the 
-// size of the instance buffers from the size of the instance descriptor 
-// D3D12_RAYTRACING_INSTANCE_DESC and the number of instances. As for the BLAS, the scratch
-// and result buffers are directly allocated in GPU memory, on the default heap. The instance 
-// descriptors buffer will need to be mapped within the helper, and has to be allocated on the 
-// upload heap. Once the buffers are allocated, the Generate call fills in the instance descriptions
-// buffer and a descriptor of the building work to be done, with a 
-// D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL type. This descriptor is then passed to 
-// ID3D12GraphicsCommandList4::BuildRaytracingAccelerationStructure which builds an acceleration 
-// structure holding all the instances.
+// 与 BLAS 相似，临时和结果缓冲都被直接分配到 GPU 内存中，在默认堆里。Instance descriptors buffer
+// 需要在 helper 中完成映射，并需要分配与 upload 堆。一旦完成缓冲分配，生成call 使用 
+// D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL 类型填入 instance descriptions buffer 
+// 和所需要完成构建的工作的 descriptor。该 descriptor 将被传递到 
+// ID3D12GraphicsCommandList4::BuildRaytracingAccelerationStructure 来构建持有所有实例的
+// 加速结构。
 //
-void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3D12Resource>, DirectX::XMMATRIX>>& instances // pair of bottom level AS and matrix of the instance
-) 
-{ 
-	// Gather all the instances into the builder helper 
+void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3D12Resource>, DirectX::XMMATRIX>>& instances) { 
+	// 1. 获取所有实例到 m_topLevelASGenerator 中
+	// # DXR - per isntance data
+	// 现在实例都是相互独立，我们需要将实例与其自己在SBT中的 hit 相关联。
 	for (size_t i = 0; i < instances.size(); i++) 
 	{ 
-		m_topLevelASGenerator.AddInstance(instances[i].first.Get(), instances[i].second, static_cast<UINT>(i), static_cast<UINT>(0));
+		m_topLevelASGenerator.AddInstance(
+			instances[i].first.Get(), 
+			instances[i].second, 
+			static_cast<UINT>(i)   /* 实例ID，可通过DXR内置方法InstanceID()在hlsl中获取该值 */,
+			static_cast<UINT>(i)); /* 这里我们需要将实例与其自己在SBT中的Hit group关联，
+								      这样 i-th 三角形将会调用第一个在SBT中定义的hitgroup，
+									  其自生引用 m_perInstanceConstantBuffers[i] */
 	} 
-	// As for the bottom-level AS, the building the AS requires some scratch space 
-	// to store temporary data in addition to the actual AS. In the case of the 
-	// top-level AS, the instance descriptors also need to be stored in GPU
-	// memory. This call outputs the memory requirements for each (scratch, 
-	// results, instance descriptors) so that the application can allocate the 
-	// corresponding memory 
+
+	// 与 BLAS 类似，构造加速结构需要一些临时空间(scratch space)来存储临时数据以创建实际的加速结构。
+	// 在 TLAS 情景下，instance descriptor 同样需要被存储到 GPU 内存中。该方法输出了每个 (scratch
+	// ,result, instance descriptor) 的内存需求，这样程序可以分配相应的内存。
 	UINT64 scratchSize, resultSize, instanceDescsSize; 
-	m_topLevelASGenerator.ComputeASBufferSizes(m_device.Get(), true, &scratchSize, &resultSize, &instanceDescsSize);
-	// Create the scratch and result buffers. Since the build is all done on GPU, 
-	// those can be allocated on the default heap 
-	m_topLevelASBuffers.pScratch = nv_helpers_dx12::CreateBuffer(m_device.Get(), 
+	m_topLevelASGenerator.ComputeASBufferSizes(
+		m_device.Get(), true, &scratchSize, &resultSize, &instanceDescsSize);
+	// 创建临时和结果缓冲。由于构造在GPU中已完成，这些可以直接分配在默认堆中。
+	m_topLevelASBuffers.pScratch = nv_helpers_dx12::CreateBuffer(
+		m_device.Get(), 
 		scratchSize, 
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
 		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 
 		nv_helpers_dx12::kDefaultHeapProps);
-	m_topLevelASBuffers.pResult = nv_helpers_dx12::CreateBuffer( m_device.Get(), 
+	m_topLevelASBuffers.pResult = nv_helpers_dx12::CreateBuffer( 
+		m_device.Get(), 
 		resultSize, 
 		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 
 		D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, 
@@ -632,33 +604,45 @@ void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3
 	// can build the acceleration structure. Note that in the case of the update 
 	// we also pass the existing AS as the 'previous' AS, so that it can be 
 	// refitted in place. 
-	m_topLevelASGenerator.Generate(m_commandList.Get(), m_topLevelASBuffers.pScratch.Get(), m_topLevelASBuffers.pResult.Get(), m_topLevelASBuffers.pInstanceDesc.Get());
+	m_topLevelASGenerator.Generate(
+		m_commandList.Get(), 
+		m_topLevelASBuffers.pScratch.Get(), 
+		m_topLevelASBuffers.pResult.Get(), 
+		m_topLevelASBuffers.pInstanceDesc.Get());
 }
 
-//-----------------------------------------------------------------------------
+//---CreateAccelerationStructures----------------------------------------------------------
 // 
-// Combine the BLAS and TLAS builds to construct the entire acceleration
-// structure required to raytrace the scene
-//
-// The CreateAccelerationStructures function calls AS builders for the bottom and the top, 
-// and store the generated structures. Note that while we only keep resulting BLAS of the 
-// triangle and discard the scratch space, we store all buffers for the TLAS into 
-// m_topLevelASBuffers in anticipation of the handling of dynamic scenes, where the scratch 
-// space will be used repeatedly. This method first fills the command list with the build
-// orders for the bottom-level acceleration structures. For each BLAS, the helper introduces 
-// a resource barrier D3D12_RESOURCE_BARRIER_TYPE_UAV to ensure the BLAS can be queried within
-// the same command list. This is required as the top-level AS is also built in that command 
-// list. After enqueuing the AS build calls, we execute the command list immediately by calling
-// ExecuteCommandLists and using a fence to flush the command list before starting rendering.
+// 结合 Bottom Level Acceleration Structure (BLAS) 和 Top-Level Acceleration Structure (TLAS)
+// 来构建光追场景所需要的完整加速结构 (AS)
+// 
+// 该方法调用 AS builds 来构造 BLAS 和 TLAS 并且保存所生成的结构。虽然我们仅保留三角形的 BLAS 结构
+// 并舍弃暂存空间(scratch space) ，我们保存了所有 TLAS 的缓冲到 m_topLevelASBuffers 预期处理动态
+// 场景，其中暂存空间将被反复使用。
+// 
+// 该方法首先用构建 BLAS 的命令填充 command list。对于每个 BLAS，helper 引入了一个资源屏障
+// D3D12_RESOURCE_BARRIER_TYPE_UAV 来确保 BLAS 可以在同个 command list 被请求。正如 TLAS 同样在
+// 该 command list 中，这是必须的。F
+// 
+// 在请求 AS build 后，我们通过 ExecuteCommandLists 立即执行了 command list，并使用了一个 fence
+// 在开始渲染前刷新 command list。
 void D3D12HelloTriangle::CreateAccelerationStructures() { 
-	// 从 triangle vertex buffer 构造 bottom-level AS 
+	// 从 triangle vertex buffer 构造 BLAS 
 	AccelerationStructureBuffers bottomLevelBuffers = CreateBottomLevelAS({{m_vertexBuffer.Get(), 3}}); 
+	// 从 plan vertex buffer 构造 BLAS
+	AccelerationStructureBuffers planeBottomLevelBuffers = CreateBottomLevelAS({ {m_planeBuffer.Get(), 6} });
 
-	// 只需要单一实例
-	m_instances = {{bottomLevelBuffers.pResult, XMMatrixIdentity()}}; 
+	m_instances = { 
+		// # DXR Extra：三个三角形实例
+		{bottomLevelBuffers.pResult, XMMatrixIdentity()}, 
+		{bottomLevelBuffers.pResult, XMMatrixTranslation(.6f, 0, 0)}, 
+		{bottomLevelBuffers.pResult, XMMatrixTranslation(-.6f, 0, 0)}, 
+		// # DXR Extra：一个平面实例 
+		{planeBottomLevelBuffers.pResult, XMMatrixTranslation(0, 0, 0)}
+	};
 	CreateTopLevelAS(m_instances); 
 
-	// Flush the command list and wait for it to finish 
+	// 刷新 command list 并等待完成 
 	m_commandList->Close();
 	ID3D12CommandList *ppCommandLists[] = {m_commandList.Get()};
 	m_commandQueue->ExecuteCommandLists(1, ppCommandLists);
@@ -668,16 +652,16 @@ void D3D12HelloTriangle::CreateAccelerationStructures() {
 	m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
 	WaitForSingleObject(m_fenceEvent, INFINITE);
 
-	// Once the command list is finished executing, reset it to be reused for rendering 
+	// 当 command list 完成执行，将其重置用于渲染
 	ThrowIfFailed( m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get())); 
-
-	// Store the AS buffers. The rest of the buffers will be released once we exit the function
+	// 保存 BLAS 缓冲。剩余的缓冲将会在退出方程后释放
 	m_bottomLevelAS = bottomLevelBuffers.pResult;
 }
 
 // ## Raytracing Pipeline
 
-//-----------------------------------------------------------------------------
+//---CreateRayGenSignature----------------------------------------------------
+// 
 // ray generation shader 需要访问两种资源: 
 //	* the raytracing output
 //	* the top-level acceleration structure (TLAS)
@@ -693,7 +677,7 @@ ComPtr<ID3D12RootSignature> D3D12HelloTriangle::CreateRayGenSignature() {
 	nv_helpers_dx12::RootSignatureGenerator rsc;
 	rsc.AddHeapRangesParameter(
 		{{0 /*u0*/, 1 /*1 descriptor */, 0 /*use the implicit register space 0*/, D3D12_DESCRIPTOR_RANGE_TYPE_UAV /* UAV representing the output buffer*/, 0 /*heap slot where the UAV is defined*/}, 
-		 {0 /*t0*/, 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV /*Top-level acceleration structure*/, 1}, 
+		 {0 /*t0*/, 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV /* TLAS */, 1}, 
 		 {0 /*b0*/, 1, 0, D3D12_DESCRIPTOR_RANGE_TYPE_CBV /*Camera parameters*/, 2} 
 		});
 	return rsc.Generate(m_device.Get(), true);
@@ -708,6 +692,12 @@ ComPtr<ID3D12RootSignature> D3D12HelloTriangle::CreateHitSignature() {
 	// 为了访问 vertex buffer 我们需要告诉 Hit Root Signature 我们将会使用 shader resource view。
 	// 默认情况下，它会与shader中的 register(t0) 绑定
 	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV);
+	// #DXR Extra: Per-Instance Data
+	// 我们这里修改 hit shader 的 root signature 来将常量缓冲作为 root parameter 传递
+	// 与在堆中传递的缓冲相反，root parameter 可以对每个实例传递。由于这是我们第一个在
+	// root signature 声明的常量缓冲，我们将其与 register 0 绑定，它将会在 HLSL 代码中
+	// 作为 register(0) 访问。
+	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_CBV, 0);
 	return rsc.Generate(m_device.Get(), true);
 }
 
@@ -740,7 +730,9 @@ void D3D12HelloTriangle::CreateRaytracingPipeline() {
 	// [Question] 为什么在 HLSL 中symbols为小写且不匹配 C++ symbols
 	pipeline.AddLibrary(m_rayGenLibrary.Get(), { L"RayGen" });
 	pipeline.AddLibrary(m_missLibrary.Get(), { L"Miss" });
-	pipeline.AddLibrary(m_hitLibrary.Get(), { L"ClosestHit" });
+	// pipeline.AddLibrary(m_hitLibrary.Get(), { L"ClosestHit" });
+	// #DXR Extra: Per-Instance Data
+	pipeline.AddLibrary(m_hitLibrary.Get(), { L"ClosestHit", L"PlaneClosestHit" });
 
 	// 要能够使用这些 shader，每个 DX12 shader 需要一个 root signature 定义所需要访问的
 	// parameters 和 buffers
@@ -760,6 +752,8 @@ void D3D12HelloTriangle::CreateRaytracingPipeline() {
 	
 	// 对于 triangles 的 Hit group，shader 只需要插入 vertex colors 
 	pipeline.AddHitGroup(L"HitGroup", L"ClosestHit");
+	// #DXR Extra: Per-Instance Data
+	pipeline.AddHitGroup(L"PlaneHitGroup", L"PlaneClosestHit");
 
 	// 这里我们将 root signature 与每个 shader 关联。我们可以 explicity 展示一些 shader 共享一些 root signature
 	// (如. Miss and ShadowMiss)。Hit shaders 仅指代 Hit group, 这意味着 底层交点，any-hit 和 closest-hit shaders
@@ -767,6 +761,8 @@ void D3D12HelloTriangle::CreateRaytracingPipeline() {
 	pipeline.AddRootSignatureAssociation(m_rayGenSignature.Get(), { L"RayGen" });
 	pipeline.AddRootSignatureAssociation(m_missSignature.Get(), { L"Miss" });
 	pipeline.AddRootSignatureAssociation(m_hitSignature.Get(), { L"HitGroup" });
+	// #DXR Extra: Per-Instance Data
+	pipeline.AddRootSignatureAssociation(m_hitSignature.Get(), { L"HitGroup", L"PlaneHitGroup" });
 
 	// payload size 定义了 rays 所能携带的最大数据量，即，shaders间交换的数据，如 HLSL 代码中 HitInfo
 	// structure。将该值保持在最低尤为关键，否者会产生过高的内存消耗和缓存垃圾。
@@ -860,56 +856,70 @@ void D3D12HelloTriangle::CreateShaderResourceHeap() {
 	m_device->CreateConstantBufferView(&cbvDesc, srvHandle);
 }
 
-//-----------------------------------------------------------------------------
+//---CreateShaderBindingTable---------------------------------------------------
 //
-// The Shader Binding Table (SBT) is the cornerstone of the raytracing setup:
-// this is where the shader resources are bound to the shaders, in a way that
-// can be interpreted by the raytracer on GPU. In terms of layout, the SBT
-// contains a series of shader IDs with their resource pointers. The SBT
-// contains the ray generation shader, the miss shaders, then the hit groups.
-// Using the helper class, those can be specified in arbitrary order.
+// 着色器绑定表（shader binding table, SBT）是光追设置的基石：在这里，shader resource
+// 与 shader 以能被 GPU 光追所解析的方式绑定。在布局方面，SBT 包含了一系列的着色器 ID 及
+// 他们的资源指针。SBT 包含了
+// * ray generation shader
+// * miss shader
+// * hit group
+// 利用 helper 类，这些可以以任意顺序指定
 //
 void D3D12HelloTriangle::CreateShaderBindingTable() {
-	// The SBT helper class collects calls to Add*Program.  If called several
-	// times, the helper must be emptied before re-adding shaders.
+	// SBT 帮助类包含对 Add* 程序的调用。如果被反复调用，帮助类必须得在重新加入着色器前清空。
 	m_sbtHelper.Reset();
 
-	// The pointer to the beginning of the heap is the only parameter required by
-	// shaders without root parameters
-	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle =
-		m_srvUavHeap->GetGPUDescriptorHandleForHeapStart();
+	// 指向堆开头的指针是没有根参数的着色器唯一需要的参数
+	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle =	m_srvUavHeap->GetGPUDescriptorHandleForHeapStart();
 
-	// The helper treats both root parameter pointers and heap pointers as void*,
-	// while DX12 uses the
-	// D3D12_GPU_DESCRIPTOR_HANDLE to define heap pointers. The pointer in this
-	// struct is a UINT64, which then has to be reinterpreted as a pointer.
+	// 帮助类将 root parameter pointers 和 heap pointers 都视为 void*，且 DX12 使用
+	// D3D12_GPU_DESCRIPTOR_HANDLE 来定义 heap pointers. 在这个结构体的指针是 UINT64*
+	// 我们需要将其 reinterpreted
 	auto heapPointer = reinterpret_cast<UINT64*>(srvUavHeapHandle.ptr);
 
-	// The ray generation only uses heap data
+	// ray generation shader 只需要堆数据
 	m_sbtHelper.AddRayGenerationProgram(L"RayGen", { heapPointer });
 
-	// The miss and hit shaders do not access any external resources: instead they
-	// communicate their results through the ray payload
+	// miss 和 hit shader 并不需要访问外部数据，他们是通过 ray payload 来通信
 	m_sbtHelper.AddMissProgram(L"Miss", {});
 
-	// Adding the triangle hit shader
+	// 添加三角形碰撞 shader 
 	// 这里需要将GPU内存中的这个缓冲地址传递给 Hit shader
-	m_sbtHelper.AddHitGroup(L"HitGroup",{ (void*)(m_vertexBuffer->GetGPUVirtualAddress()) });
+	// 
+	// #DXR Extra: Per-Instance Data
+	// 我们有三个三角形，他们中的每个都需要访问其自己的常量缓冲作为root parameter在其primary hit shader。
+	// shadow hit 只需要在payload中设置是否可见，因此不需要外部数据。
+	// 需要注意的是，这里每个instance都绑定其对应的 Hit Group，因此我们需要在每个hitgroup中都持有 m_vertexBuffer
+	for (int i = 0; i < 3; ++i) 
+	{
+		m_sbtHelper.AddHitGroup(
+			L"HitGroup",
+			{(void*)(m_vertexBuffer->GetGPUVirtualAddress()),
+			 // (void*)(m_globalConstantBuffer->GetGPUVirtualAddress()),
+			 (void*)(m_perInstanceConstantBuffers[i]->GetGPUVirtualAddress())
+			});
+	}
 
-	// Compute the size of the SBT given the number of shaders and their
-	// parameters
+	// #DXR Extra: Per-Instance Data
+	// 添加地平面
+	m_sbtHelper.AddHitGroup(L"PlaneHitGroup", {});
+
+	// 给定shader和他们的参数，计算SBT的大小
 	uint32_t sbtSize = m_sbtHelper.ComputeSBTSize();
 
-	// Create the SBT on the upload heap. This is required as the helper will use
-	// mapping to write the SBT contents. After the SBT compilation it could be
-	// copied to the default heap for performance.
+	// 在 upload heap 中创建 SBT. 由于帮助类需要使用映射来编写 SBT 内容，这是必须的。
+	// 在 SBT 编译后，它可以被复制到 default heap 来提升性能
 	m_sbtStorage = nv_helpers_dx12::CreateBuffer(
-		m_device.Get(), sbtSize, D3D12_RESOURCE_FLAG_NONE,
-		D3D12_RESOURCE_STATE_GENERIC_READ, nv_helpers_dx12::kUploadHeapProps);
+		m_device.Get(), 
+		sbtSize, 
+		D3D12_RESOURCE_FLAG_NONE,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nv_helpers_dx12::kUploadHeapProps);
 	if (!m_sbtStorage) {
 		throw std::logic_error("Could not allocate the shader binding table");
 	}
-	// Compile the SBT from the shader and parameters info
+	// 编译 shader
 	m_sbtHelper.Generate(m_sbtStorage.Get(), m_rtStateObjectProps.Get());
 }
 
@@ -946,12 +956,6 @@ void D3D12HelloTriangle::UpdateCameraBuffer() {
 	std::vector<XMMATRIX> matrices(4); 
 	// 初始化 view matrix，理想情况下该矩阵基于用户的互动。用于光栅化的 lookat 和 
 	// perspective matrices 被定义来将世界向量变换到 [0,1]x[0,1]x[0,1] 相机空间
-	/* 
-	XMVECTOR Eye = XMVectorSet(1.5f, 1.5f, 1.5f, 0.0f);
-	XMVECTOR At = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
-	XMVECTOR Up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f); 
-	matrices[0] = XMMatrixLookAtRH(Eye, At, Up); 
-	*/
 	const glm::mat4& mat = nv_helpers_dx12::CameraManip.getMatrix(); 
 	memcpy(&matrices[0].r->m128_f32[0], glm::value_ptr(mat), 16 * sizeof(float));
 
@@ -990,4 +994,157 @@ void D3D12HelloTriangle::OnMouseMove(UINT8 wParam, UINT32 lParam) {
 	inputs.shift = GetAsyncKeyState(VK_SHIFT);
 	inputs.alt = GetAsyncKeyState(VK_MENU); 
 	nv_helpers_dx12::CameraManip.mouseMove(-GET_X_LPARAM(lParam), -GET_Y_LPARAM(lParam), inputs);
+}
+
+// #DXR Extra: Per-Instance Data
+//---CreatePlaneVB-------------------------------------------------------------
+//
+// 给平面创建顶点缓冲（vertex buffer,VB）
+//
+void D3D12HelloTriangle::CreatePlaneVB() {
+	// 定义平面几何结构
+	Vertex planeVertices[] = { 
+		{{-1.5f, -.8f, 01.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 0 
+		{{-1.5f, -.8f, -1.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 1 
+		{{01.5f, -.8f, 01.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 2 
+		{{01.5f, -.8f, 01.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 2 
+		{{-1.5f, -.8f, -1.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}, // 1 
+		{{01.5f, -.8f, -1.5f}, {1.0f, 1.0f, 1.0f, 1.0f}}  // 4 
+	}; 
+	const UINT planeBufferSize = sizeof(planeVertices); 
+	// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
+	// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
+	// 适用于简化代码，并且只有很少的 verts 被实际转移。
+	CD3DX12_HEAP_PROPERTIES heapProperty =
+		CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	CD3DX12_RESOURCE_DESC bufferResource =
+		CD3DX12_RESOURCE_DESC::Buffer(planeBufferSize);
+	ThrowIfFailed(m_device->CreateCommittedResource(
+		&heapProperty, D3D12_HEAP_FLAG_NONE, &bufferResource,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+		IID_PPV_ARGS(&m_planeBuffer)));
+
+	// 将三角形数据复制到顶点缓冲（vertex buffer）
+	UINT8* pVertexDataBegin;
+	CD3DX12_RANGE readRange(0, 0);	// 我们并不打算从CPU的这个资源读取数据。
+	ThrowIfFailed(m_planeBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+	memcpy(pVertexDataBegin, planeVertices, sizeof(planeVertices));
+	m_planeBuffer->Unmap(0, nullptr);
+
+	// 初始化顶点缓存视图（vertex buffer view）.
+	m_planeBufferView.BufferLocation = m_planeBuffer->GetGPUVirtualAddress();
+	m_planeBufferView.StrideInBytes = sizeof(Vertex);
+	m_planeBufferView.SizeInBytes = planeBufferSize;
+}
+
+// #DXR Extra: Per-Instance Data
+//---CreatePlaneVB-------------------------------------------------------------
+//
+// 给平面创建顶点缓冲（vertex buffer,VB）
+//
+void D3D12HelloTriangle::CreateTriangleVB() {
+	// 定义三角形几何结构
+	Vertex triangleVertices[] = {
+		{{0.0f, 0.25f * m_aspectRatio, 0.0f}, {1.0f, 1.0f, 0.0f, 1.0f}},
+		{{0.25f, -0.25f * m_aspectRatio, 0.0f}, {0.0f, 1.0f, 1.0f, 1.0f}},
+		{{-0.25f, -0.25f * m_aspectRatio, 0.0f}, {1.0f, 0.0f, 1.0f, 1.0f}}
+	};
+	const UINT vertexBufferSize = sizeof(triangleVertices);
+	// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
+	// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
+	// 适用于简化代码，并且只有很少的 verts 被实际转移。
+	ThrowIfFailed(m_device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&m_vertexBuffer)));
+
+	// 将三角形数据复制到顶点缓冲
+	UINT8* pVertexDataBegin;
+	CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
+	ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+	memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
+	m_vertexBuffer->Unmap(0, nullptr);
+
+	// 初始化顶点缓冲视图
+	m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+	m_vertexBufferView.SizeInBytes = vertexBufferSize;
+}
+
+// #DXR Extra: Per-Instance Data
+//-----------------------------------------------------------------------------
+// 创建全局常量缓冲 
+//
+void D3D12HelloTriangle::CreateGlobalConstantBuffer()
+{ // 由于HLSL包裹规则，我们创建了 9个float4 的 CB (each needs to start on a 16-byte boundary)
+	XMVECTOR bufferData[] = { 
+		// A 
+		XMVECTOR{1.0f, 0.0f, 0.0f, 1.0f}, 
+		XMVECTOR{0.7f, 0.4f, 0.0f, 1.0f}, 
+		XMVECTOR{0.4f, 0.7f, 0.0f, 1.0f}, 
+		// B 
+		XMVECTOR{0.0f, 1.0f, 0.0f, 1.0f}, 
+		XMVECTOR{0.0f, 0.7f, 0.4f, 1.0f}, 
+		XMVECTOR{0.0f, 0.4f, 0.7f, 1.0f}, 
+		// C 
+		XMVECTOR{0.0f, 0.0f, 1.0f, 1.0f}, 
+		XMVECTOR{0.4f, 0.0f, 0.7f, 1.0f}, 
+		XMVECTOR{0.7f, 0.0f, 0.4f, 1.0f}, 
+	}; 
+	// 创建全局常量缓冲 
+	m_globalConstantBuffer = nv_helpers_dx12::CreateBuffer( 
+		m_device.Get(),
+		sizeof(bufferData),
+		D3D12_RESOURCE_FLAG_NONE, 
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nv_helpers_dx12::kUploadHeapProps); 
+	// 将CPU内存复制到GPU 
+	uint8_t* pData; 
+	ThrowIfFailed(m_globalConstantBuffer->Map(0, nullptr, (void**)&pData));
+	memcpy(pData, bufferData, sizeof(bufferData)); 
+	m_globalConstantBuffer->Unmap(0, nullptr);
+}
+
+// #DXR Extra: Per-Instance Data
+//-----------------------------------------------------------------------------
+// 创建实例常量缓冲 
+//
+void D3D12HelloTriangle::CreatePerInstanceConstantBuffers() {
+	// Due to HLSL packing rules, we create the CB with 9 float4 (each needs to
+	// start on a 16-byte boundary)
+	XMVECTOR bufferData[] = {
+		// A
+		XMVECTOR{1.0f, 0.0f, 0.0f, 1.0f},
+		XMVECTOR{1.0f, 0.4f, 0.0f, 1.0f},
+		XMVECTOR{1.0f, 0.7f, 0.0f, 1.0f},
+
+		// B
+		XMVECTOR{0.0f, 1.0f, 0.0f, 1.0f},
+		XMVECTOR{0.0f, 1.0f, 0.4f, 1.0f},
+		XMVECTOR{0.0f, 1.0f, 0.7f, 1.0f},
+
+		// C
+		XMVECTOR{0.0f, 0.0f, 1.0f, 1.0f},
+		XMVECTOR{0.4f, 0.0f, 1.0f, 1.0f},
+		XMVECTOR{0.7f, 0.0f, 1.0f, 1.0f},
+	};
+	m_perInstanceConstantBuffers.resize(3);
+	int i(0);
+	for (auto& cb : m_perInstanceConstantBuffers) {
+		const uint32_t bufferSize = sizeof(XMVECTOR) * 3;
+		cb = nv_helpers_dx12::CreateBuffer(
+			m_device.Get(), 
+			bufferSize, 
+			D3D12_RESOURCE_FLAG_NONE,
+			D3D12_RESOURCE_STATE_GENERIC_READ, 
+			nv_helpers_dx12::kUploadHeapProps);
+		uint8_t* pData;
+		ThrowIfFailed(cb->Map(0, nullptr, (void**)&pData));
+		memcpy(pData, &bufferData[i * 3], bufferSize);
+		cb->Unmap(0, nullptr);
+		++i;
+	}
 }
