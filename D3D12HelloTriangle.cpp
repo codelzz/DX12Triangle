@@ -198,6 +198,11 @@ void D3D12HelloTriangle::LoadPipeline()
 	}
 
 	ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
+
+	// #DXR Extra: Depth Buffering
+	// The original sample does not support depth buffering, so we need to allocate a depth buffer,
+	// and later bind it before rasterization
+	CreateDepthBuffer();
 }
 
 // Load the sample assets.
@@ -259,6 +264,11 @@ void D3D12HelloTriangle::LoadAssets()
 		psoDesc.NumRenderTargets = 1;
 		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		psoDesc.SampleDesc.Count = 1;
+		// #DXR Extra: Depth Buffering
+		// Add support for depth testing, using a 32-bit floating-point depth buffer
+		psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+		psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+
 		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pipelineState)));
 	}
 
@@ -341,12 +351,20 @@ void D3D12HelloTriangle::PopulateCommandList() {
 	// 指示 backbuffer 将会作为渲染目标被使用
 	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
+	
 	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), m_frameIndex, m_rtvDescriptorSize);
-	m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+	// #DXR Extra: Depth Buffering
+	// Bind the depth buffer as a render target
+	CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+	m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
+	//m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
 
 	// 记录命令.
 	if (m_raster)
 	{
+		// #DXR Extra: Depth Buffering 
+		m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 		// #DXR Extra: Perspective Camera 
 		std::vector<ID3D12DescriptorHeap*> heaps = { m_constHeap.Get() }; 
 		m_commandList->SetDescriptorHeaps(static_cast<UINT>(heaps.size()), heaps.data()); 
@@ -858,13 +876,115 @@ void D3D12HelloTriangle::CreateShaderResourceHeap() {
 
 //---CreateShaderBindingTable---------------------------------------------------
 //
-// 着色器绑定表（shader binding table, SBT）是光追设置的基石：在这里，shader resource
-// 与 shader 以能被 GPU 光追所解析的方式绑定。在布局方面，SBT 包含了一系列的着色器 ID 及
-// 他们的资源指针。SBT 包含了
-// * ray generation shader
-// * miss shader
-// * hit group
-// 利用 helper 类，这些可以以任意顺序指定
+// 着色器绑定表（shader binding table, SBT）是光追设置的基石：它将几何实例绑定到他们对
+// 应的 hit groups，并根据 root signatures 将资源绑定到光追着色器程序。这里，我们有一个
+// 包含单一三角形的场景(DXR - Part 2)。SBT 有三个entries:
+//	1. for ray generation program
+//  2. for miss program
+//  3. for hit group 
+// 
+// ray generation 需要访问两个外部资源：
+//  1. 光追输出缓冲 (raytracing output buffer)
+//  2. 顶层加速结构 (TLAS)
+// 
+// ray generation shader 的 root signature 需要这两个资源在当前 bound heap 中可用。
+// 所以，着色器需要有一个指针指向 heap 的开头。Hit group 和 miss program 不需要任何
+// 的外部数据，因此他们的 root signature 为空。SBT 现在的布局如下
+//			----------------
+//			| Raygen |*
+//			| Indentifier |O
+//			----------------
+//			| Heap Start  |O
+//			| Pointer |*
+//			----------------
+//			| Miss |*
+//			| Indentifier |O
+//			----------------
+//			| HitGroup |O
+//			| Identifier |O
+//			----------------
+// 当光追开始时，ray generation program 的 identifer 将会被用于给每个像素执行他的
+// entry point (对应HLSL中的方法 [shader("raygeneration")] void RayGen())。指向
+// heap 的 pointer 将会使得 shader 找到需要的资源。
+// 
+// 当 ray generation 程序发出一束光线，heap pointer 会被用于找出 GPU 内存中 TLAS
+// 的位置并触发追踪。
+// 
+// 光线也许会错过所有的集合体，这种情况下 SBT 将会被用于找出 miss shader identifier 
+// 并执行对应代码。
+// 
+// 如果光线击中几何体，hit group identifier 将会被用于找到 shader 对应的 hit group:
+// * Intersection
+// * Any hit
+// * Closes hit.
+// 按照顺序，这些 shader 将会被执行并将结果发送的 ray generation shader。ray 
+// generation shader 可以从 heap 中访问光追输出缓冲并写入结果。如果场景中有多个物体
+// 及不同的 hit groups，SBT 会包括所有的 hit groups 及他们的资源。
+//
+// 例如，我们有三个物体，每一个在 main heap 中访问相机数据。物体 0,1 可以由他们各自的
+// 的纹理，而物体 2 不含纹理。SBT 将会有如下结构:
+//			------------------
+//			| Raygen |*       
+//			| Identifier |O   
+//			------------------
+//			| Heap Start |O   
+//			| Pointer |*      
+//			------------------
+//			| HitGroup0 |O    
+//			| Identifier|O    
+//			------------------
+//			| Heap Start |O	 
+//			| Pointer |*	  
+//			------------------
+//			| Texture0 |O
+//			| Pointer |O
+//			-----------------
+//			| HitGroup1 |O
+//			| Identifier |O
+//			------------------
+//			| Heap Start |O   
+//			| Pointer |*      
+//			------------------
+//			| Texture1 |O
+//			| Pointer  |O
+//			------------------
+//			| HitGroup2 |O
+//			| Identifer |O
+//			------------------
+//			| Heap Start |O
+//			| Pointer  |*
+//			-----------------
+//			|//|O
+//			||O
+//			-----------------
+//
+// 需要注意 HitGroup2 不访问任何纹理。然而，SBT 对齐需求强制每种程序类型(ray generations, miss, hitgroup)
+// 有固定的入口大小。给定程序类型的入口大小是由该类型中最大的 root signature 大小决定：
+// * ray generation 为 1
+// * miss 为 0
+// * hit group 为 2
+// 因此 SBT 入口被padding来遵循对其准则。
+// 
+// 许多实际情况下，raytracing 过程使用不同的光线类型。例如来区分常规射线和阴影射线。在这情况下，
+// 对于每种物体类型，SBT将给每种光线类型包含一个hit group。回到单一对象的例子中，加入第二种
+// 光线类型只需要将对应的 hit group 加入到 SBT 中
+// 
+//			----------------
+//			| Raygen |*
+//			| Indentifier |O
+//			----------------
+//			| Heap Start  |O
+//			| Pointer |*
+//			----------------
+//			| Miss |*
+//			| Indentifier |O
+//			----------------
+//			| HitGroup |O
+//			| Identifier |O
+//			----------------
+//			| ShadowGroup |O
+//			| Identifier |O
+//			----------------
 //
 void D3D12HelloTriangle::CreateShaderBindingTable() {
 	// SBT 帮助类包含对 Add* 程序的调用。如果被反复调用，帮助类必须得在重新加入着色器前清空。
@@ -1109,7 +1229,7 @@ void D3D12HelloTriangle::CreateGlobalConstantBuffer()
 }
 
 // #DXR Extra: Per-Instance Data
-//-----------------------------------------------------------------------------
+//---CreatePerInstanceConstantBuffers------------------------------------------
 // 创建实例常量缓冲 
 //
 void D3D12HelloTriangle::CreatePerInstanceConstantBuffers() {
@@ -1147,4 +1267,32 @@ void D3D12HelloTriangle::CreatePerInstanceConstantBuffers() {
 		cb->Unmap(0, nullptr);
 		++i;
 	}
+}
+
+//  #DXR Extra: Depth Buffer
+//---CreateDepthBuffer-----------------------------------------------------
+// 给光栅化创建深度缓冲，该缓冲需要存储到另外的heap中。
+void D3D12HelloTriangle::CreateDepthBuffer() {
+	// depth buffer heap type 是特例化的，heap 内容对 shader 不可见。
+	m_dsvHeap = nv_helpers_dx12::CreateDescriptorHeap(m_device.Get(), 1, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, false);
+	// The depth and stencil can be packed into a single 32-bit texture buffer. Since we do not need 
+	// stencil, we use the 32 bits to store depth information (DXGI_FORMAT_D32_FLOAT). 
+	D3D12_HEAP_PROPERTIES depthHeapProperties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT); 
+	D3D12_RESOURCE_DESC depthResourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_D32_FLOAT, m_width, m_height, 1, 1);
+	depthResourceDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+	// The depth values will be initialized to 1 
+	CD3DX12_CLEAR_VALUE depthOptimizedClearValue(DXGI_FORMAT_D32_FLOAT, 1.0f, 0); 
+	// Allocate the buffer itself, with a state allowing depth writes 
+	ThrowIfFailed(m_device->CreateCommittedResource( 
+		&depthHeapProperties, 
+		D3D12_HEAP_FLAG_NONE, 
+		&depthResourceDesc, 
+		D3D12_RESOURCE_STATE_DEPTH_WRITE, 
+		&depthOptimizedClearValue, IID_PPV_ARGS(&m_depthStencil))); 
+	// Write the depth buffer view into the depth buffer heap 
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {}; 
+	dsvDesc.Format = DXGI_FORMAT_D32_FLOAT; 
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D; 
+	dsvDesc.Flags = D3D12_DSV_FLAG_NONE; 
+	m_device->CreateDepthStencilView(m_depthStencil.Get(), &dsvDesc, m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
