@@ -17,6 +17,8 @@
 //  https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial/extra/dxr_tutorial_extra_per_instance_data
 // DX12 Raytracing Extras - Depth Buffer
 //  https://developer.nvidia.com/rtx/raytracing/dxr/dx12-raytracing-tutorial/extra/dxr_tutorial_extra_depth_buffer
+// DX12 Raytracing Extras - Index Geometry
+//  https://developer.nvidia.com/rtx/raytracing/dxr/DX12-Raytracing-tutorial/Extra/dxr_tutorial_extra_indexed_geometry
 // 
 //*********************************************************
 
@@ -122,8 +124,13 @@ private:
 	/// Create the acceleration structure of an instance
 	/// \param     vVertexBuffers : pair of buffer and vertex count
 	/// \return    AccelerationStructureBuffers for TLAS
+	// AccelerationStructureBuffers CreateBottomLevelAS( std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vVertexBuffers);
+	// # DXR Extra: Indexed Geometry
+	// 改写该方法使其支持索引缓冲
 	AccelerationStructureBuffers CreateBottomLevelAS(
-		std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vVertexBuffers);
+		std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vVertexBuffers, 
+		std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vIndexBuffers = {});
+
 
 	/// Create the main acceleration structure that holds all instances of the scene
 	/// \param     instances : pair of BLAS and transform
@@ -204,8 +211,15 @@ private:
 	void CreateTriangleVB();
 
 	//---DXR Extra: Depth Buffering（for rasterization）-------------------------------------------
-	// 在基础教程中，只有一个三角形并不需要消除隐藏表面
+	// 在基础教程中，只有一个三角形并不需要消除隐藏表面，这里我们加入深度缓冲来实现消除
 	void CreateDepthBuffer();
 	ComPtr< ID3D12DescriptorHeap > m_dsvHeap;
 	ComPtr< ID3D12Resource > m_depthStencil;
+
+	//---DXR Extra: Indexed Geometry
+	// 为了将基础教程中的三角形转化为三位锥体，我们将原始geometry转化为索引版本。
+	ComPtr<ID3D12Resource> m_indexBuffer;
+	D3D12_INDEX_BUFFER_VIEW m_indexBufferView;
+	void CreateTetrahedronVB();
+
 };

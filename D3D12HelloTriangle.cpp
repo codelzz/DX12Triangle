@@ -158,7 +158,7 @@ void D3D12HelloTriangle::LoadPipeline()
 
 	ComPtr<IDXGISwapChain1> swapChain;
 	ThrowIfFailed(factory->CreateSwapChainForHwnd(
-		m_commandQueue.Get(),		// Swap chain needs the queue so that it can force a flush on it.
+		m_commandQueue.Get(),	// Swap chain needs the queue so that it can force a flush on it.
 		Win32Application::GetHwnd(),
 		&swapChainDesc,
 		nullptr,
@@ -277,7 +277,9 @@ void D3D12HelloTriangle::LoadAssets()
 
 	// 创建顶点缓冲
 	{
-		CreateTriangleVB();	// 创建三角形顶点缓冲
+		// CreateTriangleVB();	// 创建三角形顶点缓冲
+		//---DXR Extra: Indexed Geometry
+		CreateTetrahedronVB();
 		// #DXR - Per Instance
 		CreatePlaneVB();    // 创建地平面顶点缓冲, 与上述三角形缓冲类似
 	}
@@ -375,8 +377,15 @@ void D3D12HelloTriangle::PopulateCommandList() {
 		const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 		m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 		m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		// m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
+		// m_commandList->DrawInstanced(3, 1, 0, 0);
+
+		// #DXR Extra: Indexed Geometry
+		// 绘制四面体
 		m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
-		m_commandList->DrawInstanced(3, 1, 0, 0);
+		m_commandList->IASetIndexBuffer(&m_indexBufferView);
+		m_commandList->DrawIndexedInstanced(12, 1, 0, 0, 0);
+
 		// #DXR Extra: Per-Instance Data
 		// 与光追相似，可视化地平面
 		m_commandList->IASetVertexBuffers(0, 1, &m_planeBufferView);
@@ -522,13 +531,40 @@ void D3D12HelloTriangle::OnKeyUp(UINT8 key)
 //    BLAS contains the full definition of the geometry, organized in a way suitable for efficiently finding
 //    ray intersections with that geometry.
 //
-D3D12HelloTriangle::AccelerationStructureBuffers D3D12HelloTriangle::CreateBottomLevelAS(std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vVertexBuffers)
-{
+// D3D12HelloTriangle::AccelerationStructureBuffers D3D12HelloTriangle::CreateBottomLevelAS(std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vVertexBuffers)
+// {
+// # DXR Extra: Indexed Geometry
+// 改写该方法使其支持索引缓冲
+// #DXR Extra: Indexed Geometry
+D3D12HelloTriangle::AccelerationStructureBuffers D3D12HelloTriangle::CreateBottomLevelAS(
+	std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vVertexBuffers, 
+	std::vector<std::pair<ComPtr<ID3D12Resource>, uint32_t>> vIndexBuffers) {
+
+	nv_helpers_dx12::BottomLevelASGenerator bottomLevelAS; 
+	// Adding all vertex buffers and not transforming their position. 
+	for (size_t i = 0; i < vVertexBuffers.size(); i++)
+	{ // 
+		for (const auto& buffer : vVertexBuffers) {
+			if (i < vIndexBuffers.size() && vIndexBuffers[i].second > 0)
+				bottomLevelAS.AddVertexBuffer(
+					vVertexBuffers[i].first.Get(),
+					0,
+					vVertexBuffers[i].second,
+					sizeof(Vertex),
+					vIndexBuffers[i].first.Get(),
+					0,
+					vIndexBuffers[i].second,
+					nullptr, 0, true);
+			else
+				bottomLevelAS.AddVertexBuffer(vVertexBuffers[i].first.Get(), 0, vVertexBuffers[i].second, sizeof(Vertex), 0, 0);
+		}
+	}
+	/*
 	nv_helpers_dx12::BottomLevelASGenerator bottomLevelAS;
 	// Adding all vertex buffers and not transforming their position.
 	for (const auto& buffer : vVertexBuffers) { 
 		bottomLevelAS.AddVertexBuffer(buffer.first.Get(), 0, buffer.second, sizeof(Vertex), 0, 0); 
-	}
+	}*/
 	// The AS build requires some scratch space to store temporary information.
 	// The amount of scratch memory is dependent on the scene complexity.
 	UINT64 scratchSizeInBytes = 0;
@@ -646,15 +682,19 @@ void D3D12HelloTriangle::CreateTopLevelAS(const std::vector<std::pair<ComPtr<ID3
 // 在开始渲染前刷新 command list。
 void D3D12HelloTriangle::CreateAccelerationStructures() { 
 	// 从 triangle vertex buffer 构造 BLAS 
-	AccelerationStructureBuffers bottomLevelBuffers = CreateBottomLevelAS({{m_vertexBuffer.Get(), 3}}); 
+	//	AccelerationStructureBuffers bottomLevelBuffers = CreateBottomLevelAS({{m_vertexBuffer.Get(), 3}}); 
+	// 构造四面体BLAS
+	AccelerationStructureBuffers bottomLevelBuffers = CreateBottomLevelAS({{m_vertexBuffer.Get(), 4} }, { {m_indexBuffer.Get(), 12} });
+
 	// 从 plan vertex buffer 构造 BLAS
 	AccelerationStructureBuffers planeBottomLevelBuffers = CreateBottomLevelAS({ {m_planeBuffer.Get(), 6} });
 
 	m_instances = { 
 		// # DXR Extra：三个三角形实例
 		{bottomLevelBuffers.pResult, XMMatrixIdentity()}, 
-		{bottomLevelBuffers.pResult, XMMatrixTranslation(.6f, 0, 0)}, 
-		{bottomLevelBuffers.pResult, XMMatrixTranslation(-.6f, 0, 0)}, 
+		// DXR Extra: Index Geometry
+		// {bottomLevelBuffers.pResult, XMMatrixTranslation(.6f, 0, 0)}, 
+		// {bottomLevelBuffers.pResult, XMMatrixTranslation(-.6f, 0, 0)}, 
 		// # DXR Extra：一个平面实例 
 		{planeBottomLevelBuffers.pResult, XMMatrixTranslation(0, 0, 0)}
 	};
@@ -707,15 +747,21 @@ ComPtr<ID3D12RootSignature> D3D12HelloTriangle::CreateRayGenSignature() {
 //
 ComPtr<ID3D12RootSignature> D3D12HelloTriangle::CreateHitSignature() {
 	nv_helpers_dx12::RootSignatureGenerator rsc;
+	// 这里创建顺序不对会导致代码异常
+
 	// 为了访问 vertex buffer 我们需要告诉 Hit Root Signature 我们将会使用 shader resource view。
 	// 默认情况下，它会与shader中的 register(t0) 绑定
-	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV);
+	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV, 0 /*t0*/);
+	// DXR Extra: Indexed Geometry
+	// vertices and colors 
+	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_SRV, 1 /*t1*/); // indices
+
 	// #DXR Extra: Per-Instance Data
 	// 我们这里修改 hit shader 的 root signature 来将常量缓冲作为 root parameter 传递
 	// 与在堆中传递的缓冲相反，root parameter 可以对每个实例传递。由于这是我们第一个在
 	// root signature 声明的常量缓冲，我们将其与 register 0 绑定，它将会在 HLSL 代码中
 	// 作为 register(0) 访问。
-	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_CBV, 0);
+	rsc.AddRootParameter(D3D12_ROOT_PARAMETER_TYPE_CBV, 0 /*b0*/);
 	return rsc.Generate(m_device.Get(), true);
 }
 
@@ -991,7 +1037,7 @@ void D3D12HelloTriangle::CreateShaderBindingTable() {
 	m_sbtHelper.Reset();
 
 	// 指向堆开头的指针是没有根参数的着色器唯一需要的参数
-	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle =	m_srvUavHeap->GetGPUDescriptorHandleForHeapStart();
+	D3D12_GPU_DESCRIPTOR_HANDLE srvUavHeapHandle = m_srvUavHeap->GetGPUDescriptorHandleForHeapStart();
 
 	// 帮助类将 root parameter pointers 和 heap pointers 都视为 void*，且 DX12 使用
 	// D3D12_GPU_DESCRIPTOR_HANDLE 来定义 heap pointers. 在这个结构体的指针是 UINT64*
@@ -1011,15 +1057,23 @@ void D3D12HelloTriangle::CreateShaderBindingTable() {
 	// 我们有三个三角形，他们中的每个都需要访问其自己的常量缓冲作为root parameter在其primary hit shader。
 	// shadow hit 只需要在payload中设置是否可见，因此不需要外部数据。
 	// 需要注意的是，这里每个instance都绑定其对应的 Hit Group，因此我们需要在每个hitgroup中都持有 m_vertexBuffer
+
+	m_sbtHelper.AddHitGroup(L"HitGroup", 
+		{(void*)(m_vertexBuffer->GetGPUVirtualAddress()), 
+		 (void*)(m_indexBuffer->GetGPUVirtualAddress()),
+		 (void*)(m_perInstanceConstantBuffers[0]->GetGPUVirtualAddress())
+		});
+
+	/*
 	for (int i = 0; i < 3; ++i) 
 	{
 		m_sbtHelper.AddHitGroup(
 			L"HitGroup",
 			{(void*)(m_vertexBuffer->GetGPUVirtualAddress()),
-			 // (void*)(m_globalConstantBuffer->GetGPUVirtualAddress()),
+			 (void*)(m_globalConstantBuffer->GetGPUVirtualAddress()),
 			 (void*)(m_perInstanceConstantBuffers[i]->GetGPUVirtualAddress())
 			});
-	}
+	}*/
 
 	// #DXR Extra: Per-Instance Data
 	// 添加地平面
@@ -1095,7 +1149,6 @@ void D3D12HelloTriangle::UpdateCameraBuffer() {
 // # DXR Extra - Perspective Camera
 //-------------------------------------------------------------------------------- 
 //  
-// 
 void D3D12HelloTriangle::OnButtonDown(UINT32 lParam) {
 	nv_helpers_dx12::CameraManip.setMousePosition(-GET_X_LPARAM(lParam), -GET_Y_LPARAM(lParam)); 
 } 
@@ -1160,7 +1213,7 @@ void D3D12HelloTriangle::CreatePlaneVB() {
 // #DXR Extra: Per-Instance Data
 //---CreatePlaneVB-------------------------------------------------------------
 //
-// 给平面创建顶点缓冲（vertex buffer,VB）
+// 给三角形创建顶点缓冲（vertex buffer,VB）
 //
 void D3D12HelloTriangle::CreateTriangleVB() {
 	// 定义三角形几何结构
@@ -1192,6 +1245,64 @@ void D3D12HelloTriangle::CreateTriangleVB() {
 	m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
 	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
 	m_vertexBufferView.SizeInBytes = vertexBufferSize;
+}
+
+// #DXR Extra: Indexed Geometry
+//---CreatePlaneVB-------------------------------------------------------------
+//
+// 给四面体创建顶点缓冲（vertex buffer,VB）
+//
+void D3D12HelloTriangle::CreateTetrahedronVB() {
+	Vertex tetrahedronVertices[] = {
+		{{std::sqrtf(8.f / 9.f), 0.f, -1.f / 3.f}, {1.f, 0.f, 0.f, 1.f}}, 
+		{{-std::sqrtf(2.f / 9.f), std::sqrtf(2.f / 3.f), -1.f / 3.f}, {0.f, 1.f, 0.f, 1.f}}, 
+		{{-std::sqrtf(2.f / 9.f), -std::sqrtf(2.f / 3.f), -1.f / 3.f}, {0.f, 0.f, 1.f, 1.f}}, 
+		{{0.f, 0.f, 1.f}, {1, 0, 1, 1}} 
+	};
+
+	const UINT vertexBufferSize = sizeof(tetrahedronVertices);
+	// 【注意】 使用 upload heaps 来传输 static data 就像 vert buffer 一样不被推荐。
+	// 每次 GPU 需要他时，upload heap 都会被编组（marshalled）。在这里的 upload head
+	// 适用于简化代码，并且只有很少的 verts 被实际转移。
+	ThrowIfFailed(m_device->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+		D3D12_HEAP_FLAG_NONE,
+		&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&m_vertexBuffer)));
+
+	// 数据复制到顶点缓冲
+	UINT8* pVertexDataBegin;
+	CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
+	ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+	memcpy(pVertexDataBegin, tetrahedronVertices, sizeof(tetrahedronVertices));
+	m_vertexBuffer->Unmap(0, nullptr);
+
+	// 初始化顶点缓冲视图
+	m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+	m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+	m_vertexBufferView.SizeInBytes = vertexBufferSize;
+
+	//---DXR Extra: Indexed Geometry------------------------------------------------------------------------
+	// Indices
+	std::vector<UINT> indices = { 0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2 };
+	const UINT indexBufferSize = static_cast<UINT>(indices.size()) * sizeof(UINT);
+	CD3DX12_HEAP_PROPERTIES heapProperty = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	CD3DX12_RESOURCE_DESC bufferResource = CD3DX12_RESOURCE_DESC::Buffer(indexBufferSize);
+	ThrowIfFailed(m_device->CreateCommittedResource(&heapProperty, D3D12_HEAP_FLAG_NONE, &bufferResource, // 
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_indexBuffer)));
+
+	// Copy the triangle data to the index buffer.
+	UINT8 * pIndexDataBegin;
+	ThrowIfFailed(m_indexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pIndexDataBegin)));
+	memcpy(pIndexDataBegin, indices.data(), indexBufferSize);
+	m_indexBuffer->Unmap(0, nullptr);
+
+	// Initialize the index buffer view.
+	m_indexBufferView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
+	m_indexBufferView.Format = DXGI_FORMAT_R32_UINT;
+	m_indexBufferView.SizeInBytes = indexBufferSize;
 }
 
 // #DXR Extra: Per-Instance Data
